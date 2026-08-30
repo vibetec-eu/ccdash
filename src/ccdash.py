@@ -19,6 +19,9 @@ import os
 import sys
 import threading
 import time
+import re
+import subprocess
+import urllib.parse
 import webbrowser
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -27,6 +30,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ccusage_lib as c  # noqa: E402
 import jobs_lib  # noqa: E402
+
+# Ainus muster, mille /open endpoint tohib vaikebrauserile edasi anda.
+_CLAUDE_SESSION_URL = re.compile(r"https://claude\.ai/code/session_[A-Za-z0-9_-]{1,64}")
 
 REFRESH_SEC = 20
 ACTIVE_WINDOW_SEC = 10 * 60      # roheline täpp: tegevus <10 min tagasi
@@ -708,6 +714,12 @@ function renderWorking(d){
   bindCtxTips('#workList [data-ctx]');
 }
 
+// Ava link VAIKEBRAUSERIS, mitte selles aknas: dashboard jookseb omaette
+// Chrome-profiilis, kus ühtegi sisselogimist ei ole.
+function openExternal(url){
+  fetch('/open?url=' + encodeURIComponent(url)).catch(() => window.open(url, '_blank'));
+}
+
 function jobsById(d){
   const m = {};
   (d.jobs && d.jobs.items || []).forEach(j => { m[j.id] = j; });
@@ -732,7 +744,7 @@ function jobBadges(j){
   if (!j.hasTerminal) b += '<span class="badge">tabita</span>';
   if (j.waiting) b += '<span class="badge wait">⏳ ootab</span>';
   // Veebivaade claude.ai-s — ainus viis taustatööd ILMA terminalita lugeda.
-  if (j.webUrl) b += `<a class="badge web" href="${j.webUrl}" target="_blank" rel="noopener" title="Ava claude.ai-s">veeb ↗</a>`;
+  if (j.webUrl) b += `<a class="badge web" href="#" onclick="openExternal('${j.webUrl}');return false" title="Ava claude.ai-s (vaikebrauseris)">veeb ↗</a>`;
   return b;
 }
 
@@ -744,7 +756,7 @@ function renderJobs(d){
   document.getElementById('jobWaitCount').textContent = `· ${jobs.length}`;
   document.getElementById('jobList').innerHTML = jobs.map(j => `
     <div class="jobrow">
-      <div class="jid">${j.webUrl ? `<a href="${esc(j.webUrl)}" target="_blank" rel="noopener">${esc(j.id)}</a>` : esc(j.id)}</div>
+      <div class="jid">${j.webUrl ? `<a href="#" onclick="openExternal('${esc(j.webUrl)}');return false" title="Ava vaikebrauseris">${esc(j.id)}</a>` : esc(j.id)}</div>
       <div>
         <div class="jname">${esc(j.name)}${j.hasTerminal ? '' : '<span class="badge">tabita</span>'}</div>
         <div class="jneeds">${esc(j.needs || j.detail || 'blokeeritud — põhjus state.json-is puudub, vaata: claude logs ' + j.id)}</div>
@@ -889,6 +901,21 @@ class Handler(BaseHTTPRequestHandler):
             with _lock:
                 body = json.dumps(_cache, ensure_ascii=False).encode("utf-8")
             self._send(200, "application/json; charset=utf-8", body)
+        elif self.path.startswith("/open?"):
+            # Dashboard elab omaette Chrome-profiilis (`--app` +
+            # `--user-data-dir=~/.claude/.ccdash-chrome`), kus ei ole ühtegi
+            # sisselogimist. `target=_blank` jääks samasse tühja profiili ja
+            # kasutaja satuks login-ekraanile. macOS `open` annab lingi
+            # VAIKEBRAUSERILE, kus sessioon juba on.
+            url = urllib.parse.parse_qs(
+                urllib.parse.urlparse(self.path).query).get("url", [""])[0]
+            if _CLAUDE_SESSION_URL.fullmatch(url):
+                subprocess.Popen(["open", url])
+                self._send(204, "text/plain; charset=utf-8", b"")
+            else:
+                # Server on lokaalne, aga see endpoint käivitab välise
+                # avamise — lubatud on AINULT claude.ai sessiooni-URL.
+                self._send(400, "text/plain; charset=utf-8", b"lubamatu url")
         elif self.path in ("/", "/index.html"):
             self._send(200, "text/html; charset=utf-8", PAGE.encode("utf-8"))
         else:
