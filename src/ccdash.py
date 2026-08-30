@@ -26,6 +26,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ccusage_lib as c  # noqa: E402
+import jobs_lib  # noqa: E402
 
 REFRESH_SEC = 20
 ACTIVE_WINDOW_SEC = 10 * 60      # roheline täpp: tegevus <10 min tagasi
@@ -142,6 +143,11 @@ def collect() -> dict:
     sessions = c.enrich_sessions(parts["session"])
     if DEMO:
         sessions = demo_anonymize(sessions)
+    # Taustatööd: collect_jobs() ei tõsta kunagi erindit (vt jobs_lib), sest
+    # iga erind siin peidaks brauseris KOGU dashboardi veabänneri taha.
+    jobs = jobs_lib.collect_jobs()
+    if DEMO:
+        jobs = jobs_lib.demo_anonymize_jobs(jobs)
     blocks = c.fetch_blocks()
 
     today = c.today_str()
@@ -218,6 +224,7 @@ def collect() -> dict:
         "chart": chart,
         "chartStats": chart_stats,
         "sessionCount": len(sessions),
+        "jobs": jobs,
     }
 
 
@@ -417,6 +424,24 @@ tbody tr:hover{background:color-mix(in oklab,var(--series-1) 7%,transparent)}
 .err{border-color:var(--critical);color:var(--critical)}
 footer{margin-top:22px;font-size:11.5px;color:var(--muted);line-height:1.65}
 .toggle{background:none;border:none;color:var(--series-1);padding:8px 0;font-size:12.5px}
+
+/* Taustatööd: ootajate hoiatusriba. Ilmub AINULT siis, kui keegi ootab vastust —
+   just seepärast tohib ta olla nii jõuline. Null müra, kui kõik on korras. */
+#jobAlert{display:none;border-left:4px solid var(--warning);margin-bottom:14px}
+#jobAlert h2{color:var(--warning)}
+.jobrow{display:grid;grid-template-columns:82px 1fr auto;gap:10px;align-items:baseline;
+  padding:8px 6px;border-top:1px solid var(--border)}
+.jobrow:first-of-type{border-top:0}
+.jobrow .jid{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+.jobrow .jname{font-weight:600}
+.jobrow .jneeds{color:var(--muted);font-size:12px;margin-top:2px}
+.jobrow .jwait{white-space:nowrap;font-size:12px;color:var(--warning)}
+.jobrow code{background:rgba(127,127,127,.14);padding:1px 5px;border-radius:4px;
+  font-size:12px;user-select:all}
+.badge{display:inline-block;font-size:10px;line-height:1.5;padding:0 5px;border-radius:4px;
+  margin-left:5px;background:rgba(127,127,127,.14);color:var(--muted);
+  vertical-align:middle}
+.badge.wait{background:var(--warning);color:#1a1a1a;font-weight:600}
 </style>
 </head>
 <body>
@@ -430,6 +455,14 @@ footer{margin-top:22px;font-size:11.5px;color:var(--muted);line-height:1.65}
   </header>
 
   <div id="errBox"></div>
+
+  <section class="card" id="jobAlert">
+    <h2>⏳ Taustatööd ootavad sinu vastust <span class="count" id="jobWaitCount"></span></h2>
+    <p class="hint">Need jooksevad daemonis, ilma terminalita — VS Code'i tabiribal ega
+      <code>/tasks</code> all neid EI OLE. Ava käsuga <code>claude attach &lt;id&gt;</code>
+      päris terminalis (vajab TTY-d, Claude'i sessiooni seest ei tööta).</p>
+    <div id="jobList"></div>
+  </section>
 
   <section class="card" style="margin-bottom:14px">
     <h2>Limiitide aknad</h2>
@@ -644,7 +677,7 @@ function renderLimits(d){
 }
 
 function renderWorking(d){
-  const rows = d.sessions.filter(s => s.working);
+  const rows = d.sessions.filter(s => s.working), jb = jobsById(d);
   document.getElementById('workCount').textContent = rows.length ? `· ${rows.length}` : '';
   if (!rows.length){
     document.getElementById('workList').innerHTML =
@@ -659,7 +692,7 @@ function renderWorking(d){
     <div class="work">
       <div class="who">
         <div class="proj">${s.live ? '<span class="livedot"></span>' : ''}${esc(s.project)}</div>
-        <div class="ttl">${esc(s.title || s.short)}</div>
+        <div class="ttl">${esc(s.title || s.short)}${jobBadges(jb[s.short])}</div>
       </div>
       <div class="when">${s.last.slice(6)}</div>
       <div class="ctxwrap" data-ctx="${s.ctx}">
@@ -670,6 +703,50 @@ function renderWorking(d){
     </div>`;
   }).join('');
   bindCtxTips('#workList [data-ctx]');
+}
+
+function jobsById(d){
+  const m = {};
+  (d.jobs && d.jobs.items || []).forEach(j => { m[j.id] = j; });
+  return m;
+}
+
+// "ootab 3 päeva" — mitte töö vanus, vaid kui kaua ta on VASTUSETA seisnud.
+function waitedFor(iso){
+  if (!iso) return '';
+  const ms = Date.now() - new Date(iso).getTime();
+  if (isNaN(ms) || ms < 0) return '';
+  const h = ms / 3600000;
+  if (h < 1) return `ootab ${Math.max(1, Math.round(ms/60000))} min`;
+  if (h < 48) return `ootab ${Math.round(h)} h`;
+  return `ootab ${Math.round(h/24)} päeva`;
+}
+
+// Märgid sessioonireal: taustatöö, tabita, ootab.
+function jobBadges(j){
+  if (!j) return '';
+  let b = '<span class="badge">bg</span>';
+  if (!j.hasTerminal) b += '<span class="badge">tabita</span>';
+  if (j.waiting) b += '<span class="badge wait">⏳ ootab</span>';
+  return b;
+}
+
+function renderJobs(d){
+  const box = document.getElementById('jobAlert');
+  const jobs = (d.jobs && d.jobs.items || []).filter(j => j.waiting);
+  if (!jobs.length){ box.style.display = 'none'; return; }
+  box.style.display = '';
+  document.getElementById('jobWaitCount').textContent = `· ${jobs.length}`;
+  document.getElementById('jobList').innerHTML = jobs.map(j => `
+    <div class="jobrow">
+      <div class="jid">${esc(j.id)}</div>
+      <div>
+        <div class="jname">${esc(j.name)}${j.hasTerminal ? '' : '<span class="badge">tabita</span>'}</div>
+        <div class="jneeds">${esc(j.needs || j.detail || 'blokeeritud — põhjus state.json-is puudub, vaata: claude logs ' + j.id)}</div>
+        <div class="jneeds"><code>claude attach ${esc(j.id)}</code></div>
+      </div>
+      <div class="jwait">${waitedFor(j.updatedAt)}</div>
+    </div>`).join('');
 }
 
 function renderChartStats(d){
@@ -707,14 +784,14 @@ function renderProjects(d){
 }
 
 function renderSessions(d){
-  const all = d.sessions, rows = showAll ? all : all.slice(0, 20);
+  const all = d.sessions, rows = showAll ? all : all.slice(0, 20), jb = jobsById(d);
   // Skaleeri NÄHTAVA hulga suurima järgi — üks hiiglaslik vana sessioon surus
   // muidu kõik ülejäänud ribad punktideks kokku.
   const max = Math.max(...rows.map(s => s.cost), 0.01);
   document.getElementById('sessBody').innerHTML = rows.map(s => `
     <tr>
       <td><span class="proj">${s.live ? '<span class="livedot"></span>' : ''}${s.project}</span>
-          <div class="sid">${s.title ? esc(s.title) : s.short}</div></td>
+          <div class="sid">${s.title ? esc(s.title) : s.short}${jobBadges(jb[s.short])}</div></td>
       <td>${s.last}<div class="sid">${s.models.map(m => m.replace('claude-','')).join(', ')}</div></td>
       <td class="num ctx-${s.ctxLevel}" data-ctx="${s.ctx}">${s.ctx ? compact(s.ctx) : '—'}</td>
       <td class="num" data-tok="${s.tokens}">${compact(s.tokens)}</td>
@@ -769,7 +846,7 @@ async function load(){
     fxRate = (d.fx && d.fx.rate) || fxRate;
     document.getElementById('fxNote').textContent =
       `1 € = ${fxRate} $ (${d.fx ? d.fx.source : '?'}${d.fx ? ', ' + d.fx.date : ''})`;
-    renderLimits(d); renderTiles(d); renderWorking(d);
+    renderJobs(d); renderLimits(d); renderTiles(d); renderWorking(d);
     renderChartStats(d); renderChart(d); renderProjects(d); renderSessions(d);
   }catch(e){
     document.getElementById('status').innerHTML = '<span class="dot err"></span>server ei vasta';
