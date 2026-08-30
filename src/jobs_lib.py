@@ -32,7 +32,7 @@ CLI_TIMEOUT_SEC = 15
 
 # Ainus koht, kus otsustatakse, mis kliendini jõuab.
 FIELDS = ("id", "state", "name", "tokens", "needs", "detail", "intent",
-          "startedAt", "updatedAt", "hasTerminal", "waiting")
+          "startedAt", "updatedAt", "hasTerminal", "waiting", "webUrl")
 
 _state_cache: dict[str, str] = {}
 _state_fetched: float = 0.0
@@ -73,6 +73,12 @@ def _terminal_count() -> int:
     return n
 
 
+def _web_url(bridge_id: str | None) -> str | None:
+    if not bridge_id or not str(bridge_id).startswith("cse_"):
+        return None
+    return f"https://claude.ai/code/session_{str(bridge_id)[4:]}"
+
+
 def _read_jobs() -> list[dict]:
     cli = _cli_states()
     items = []
@@ -103,6 +109,11 @@ def _read_jobs() -> list[dict]:
             "updatedAt": st.get("updatedAt"),
             # Kas seda tööd on kunagi terminali avatud. False = päris nähtamatu.
             "hasTerminal": bool(st.get("firstTerminalAt")),
+            # Veebivaade claude.ai-s. `bridgeSessionId` on kujul `cse_XYZ` ja
+            # veebi-URL `.../session_XYZ` — sama sufiks (kontrollitud oma
+            # sessiooni vastu). Väljastame ainult tuletatud URL-i, mitte
+            # toorest bridge-ID-d ega `bridgeOwner*` välju.
+            "webUrl": _web_url(st.get("bridgeSessionId")),
         })
     # Ootajad ette, siis vanim seisak enne — just neid on vaja märgata.
     items.sort(key=lambda x: (not x["waiting"], x.get("updatedAt") or ""))
@@ -141,4 +152,5 @@ def demo_anonymize_jobs(jobs: dict) -> dict:
         for k in ("intent", "detail", "needs"):
             if it.get(k):
                 it[k] = "(demo)"
+        it["webUrl"] = None
     return jobs

@@ -441,6 +441,9 @@ footer{margin-top:22px;font-size:11.5px;color:var(--muted);line-height:1.65}
 .badge{display:inline-block;font-size:10px;line-height:1.5;padding:0 5px;border-radius:4px;
   margin-left:5px;background:rgba(127,127,127,.14);color:var(--muted);
   vertical-align:middle}
+.badge.web{text-decoration:none;cursor:pointer}
+.badge.web:hover{background:var(--good);color:#1a1a1a}
+#jobAlert .jid a{color:inherit}
 .badge.wait{background:var(--warning);color:#1a1a1a;font-weight:600}
 </style>
 </head>
@@ -728,6 +731,8 @@ function jobBadges(j){
   let b = '<span class="badge">bg</span>';
   if (!j.hasTerminal) b += '<span class="badge">tabita</span>';
   if (j.waiting) b += '<span class="badge wait">⏳ ootab</span>';
+  // Veebivaade claude.ai-s — ainus viis taustatööd ILMA terminalita lugeda.
+  if (j.webUrl) b += `<a class="badge web" href="${j.webUrl}" target="_blank" rel="noopener" title="Ava claude.ai-s">veeb ↗</a>`;
   return b;
 }
 
@@ -739,7 +744,7 @@ function renderJobs(d){
   document.getElementById('jobWaitCount').textContent = `· ${jobs.length}`;
   document.getElementById('jobList').innerHTML = jobs.map(j => `
     <div class="jobrow">
-      <div class="jid">${esc(j.id)}</div>
+      <div class="jid">${j.webUrl ? `<a href="${esc(j.webUrl)}" target="_blank" rel="noopener">${esc(j.id)}</a>` : esc(j.id)}</div>
       <div>
         <div class="jname">${esc(j.name)}${j.hasTerminal ? '' : '<span class="badge">tabita</span>'}</div>
         <div class="jneeds">${esc(j.needs || j.detail || 'blokeeritud — põhjus state.json-is puudub, vaata: claude logs ' + j.id)}</div>
