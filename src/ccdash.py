@@ -30,6 +30,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ccusage_lib as c  # noqa: E402
 import jobs_lib  # noqa: E402
+import tmux_lib  # noqa: E402
 
 # Ainus muster, mille /open endpoint tohib vaikebrauserile edasi anda.
 _CLAUDE_SESSION_URL = re.compile(r"https://claude\.ai/code/session_[A-Za-z0-9_-]{1,64}")
@@ -451,6 +452,48 @@ footer{margin-top:22px;font-size:11.5px;color:var(--muted);line-height:1.65}
 .badge.web:hover{background:var(--good);color:#1a1a1a}
 #jobAlert .jid a{color:inherit}
 .badge.wait{background:var(--warning);color:#1a1a1a;font-weight:600}
+
+/* --- Sessioonivalija (päise dropdown) --- */
+.menuwrap{position:relative}
+.menu{
+  position:absolute;top:calc(100% + 6px);right:0;z-index:40;width:330px;
+  max-height:min(70vh,560px);overflow-y:auto;
+  background:var(--surface-1);border:1px solid var(--border);border-radius:11px;
+  padding:8px;box-shadow:0 10px 30px rgba(0,0,0,.28);
+}
+.menu h3{
+  font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);
+  margin:10px 0 4px;padding:0 8px;font-weight:600;
+}
+.menu h3:first-child{margin-top:2px}
+.menuopt{
+  display:flex;align-items:center;gap:7px;padding:5px 8px;font-size:12.5px;
+  color:var(--text-secondary);cursor:pointer;
+}
+.menufilter{
+  font:inherit;font-size:12.5px;width:100%;margin:4px 0 2px;padding:5px 8px;
+  border-radius:7px;border:1px solid var(--border);
+  background:var(--plane);color:var(--text-primary);
+}
+.mi{
+  display:flex;align-items:baseline;gap:8px;width:100%;text-align:left;
+  padding:5px 8px;border:0;border-radius:7px;background:none;color:var(--text-primary);
+  font:inherit;font-size:13px;cursor:pointer;
+}
+.mi:hover{background:rgba(127,127,127,.14)}
+.mi .path{
+  margin-left:auto;font-size:11px;color:var(--muted);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:150px;
+}
+.mi .livedot{flex:none}
+.menu hr{border:0;border-top:1px solid var(--border);margin:8px 0 0}
+.menumsg{padding:7px 8px;font-size:12px;color:var(--text-secondary);line-height:1.45}
+.menumsg code{
+  display:block;margin-top:5px;background:rgba(127,127,127,.14);padding:4px 6px;
+  border-radius:4px;font-size:11.5px;user-select:all;word-break:break-all;
+}
+.menumsg.err{color:var(--critical)}
+.menuempty{padding:7px 8px;font-size:12px;color:var(--muted)}
 </style>
 </head>
 <body>
@@ -459,6 +502,19 @@ footer{margin-top:22px;font-size:11.5px;color:var(--muted);line-height:1.65}
     <h1>Claude Code kasutus</h1>
     <span class="sub" id="status"><span class="dot stale"></span>laen…</span>
     <span style="flex:1"></span>
+    <div class="menuwrap" id="sessWrap" hidden>
+      <button id="sessBtn" aria-haspopup="menu" aria-expanded="false"
+              title="Ava või alusta Claude-sessioon">Sessioonid ▾</button>
+      <div class="menu" id="sessMenu" hidden role="menu">
+        <label class="menuopt" id="sessLocalWrap" hidden>
+          <input type="checkbox" id="sessLocal"><span id="sessLocalLabel"></span>
+        </label>
+        <input class="menufilter" id="sessFilter" type="search" placeholder="otsi…"
+               autocomplete="off" aria-label="Otsi projekti">
+        <div id="sessMenuBody"></div>
+        <div class="menumsg" id="sessMsg" hidden></div>
+      </div>
+    </div>
     <button id="themeBtn" title="Vaheta teema">Teema</button>
     <button id="refreshBtn">Värskenda</button>
   </header>
@@ -870,6 +926,149 @@ async function load(){
   }
 }
 
+// ---------------------------------------------------------- sessioonivalija
+//
+// Eraldi /api/tmux-ist, MITTE /api/data-st: `load()` teeb `!d.ok` peal `return`,
+// seega ccusage'i viga peidaks kogu payload'i ja koos sellega selle valija,
+// mis ccusage'ist üldse ei sõltu.
+let tmuxData = null;
+const sessWrap = document.getElementById('sessWrap');
+const sessMenu = document.getElementById('sessMenu');
+const sessFilter = document.getElementById('sessFilter');
+const sessMsg = document.getElementById('sessMsg');
+const sessLocal = document.getElementById('sessLocal');
+
+// Kumb käsurida: kohalik või läbi ssh. Valik jääb meelde, sest see sõltub sellest,
+// KUS su terminal on (VS Code Remote-SSH vs kohalik aken) — ja see ei muutu tihti.
+try { sessLocal.checked = localStorage.getItem('ccdashSessLocal') === '1'; } catch(e){}
+sessLocal.onchange = () => {
+  try { localStorage.setItem('ccdashSessLocal', sessLocal.checked ? '1' : '0'); } catch(e){}
+};
+
+async function fetchTmux(){
+  try {
+    const d = await (await fetch('/api/tmux')).json();
+    tmuxData = d;
+    sessWrap.hidden = !d.enabled;
+    const wrap = document.getElementById('sessLocalWrap');
+    // Ilma seadistatud remoteHost'ita on ainult üks variant — lüliti oleks müra.
+    wrap.hidden = !d.remoteHost;
+    if (d.remoteHost)
+      document.getElementById('sessLocalLabel').textContent =
+        `olen juba masinas «${d.remoteHost}»`;
+    return d;
+  } catch(e){ return null; }
+}
+
+function shortPath(p){ return String(p).split('/').slice(-2).join('/'); }
+
+function renderSessMenu(){
+  const d = tmuxData;
+  if (!d) return;
+  const q = sessFilter.value.trim().toLowerCase();
+  const hit = s => !q || String(s).toLowerCase().includes(q);
+  const sessions = (d.sessions || []).filter(s => hit(s.name));
+  // Jooksva sessiooni projekt on juba ülemises plokis — teine rida all oleks
+  // sama asi kaks korda ja klikk sellel ei teeks midagi uut.
+  const busy = new Set((d.sessions || []).map(s => s.name));
+  const projects = (d.projects || []).filter(p => hit(p.display) && !busy.has(p.name));
+
+  const out = [];
+  if (sessions.length){
+    out.push('<h3>Jooksevad</h3>');
+    out.push(sessions.map(s => `
+      <button class="mi" data-act="attach" data-name="${esc(s.name)}">
+        ${s.attached ? '<span class="livedot"></span>' : ''}${esc(s.name)}
+        <span class="path">${esc(shortPath(s.path))}</span>
+      </button>`).join(''));
+  }
+  if (projects.length){
+    out.push('<h3>Projektid</h3>');
+    out.push(projects.map(p => `
+      <button class="mi" data-act="start" data-project="${esc(p.display)}">
+        ${esc(p.display)}
+        ${p.name !== p.display ? `<span class="path">→ ${esc(p.name)}</span>` : ''}
+      </button>`).join(''));
+  }
+  if (!sessions.length && !projects.length)
+    out.push('<div class="menuempty">Midagi ei vasta otsingule.</div>');
+  if (!q){
+    out.push('<hr>');
+    out.push('<button class="mi" data-act="chat">+ uus chat <span class="path">vaba teema</span></button>');
+  }
+  document.getElementById('sessMenuBody').innerHTML = out.join('');
+}
+
+function showSessMsg(html, isErr){
+  sessMsg.className = 'menumsg' + (isErr ? ' err' : '');
+  sessMsg.innerHTML = html;
+  sessMsg.hidden = false;
+}
+
+async function copyLine(name){
+  // Kaks varianti, sest terminal võib olla siinsamas masinas (VS Code
+  // Remote-SSH) või mujal, kust tuleb esmalt ssh-da.
+  const a = (tmuxData && tmuxData.remoteHost)
+    ? `ssh -t ${tmuxData.remoteHost} "tmux attach -t ${name}"`
+    : `tmux attach -t ${name}`;
+  const cmd = (sessLocal.checked || !(tmuxData && tmuxData.remoteHost))
+    ? `tmux attach -t ${name}` : a;
+  let ok = false;
+  try { await navigator.clipboard.writeText(cmd); ok = true; } catch(e){}
+  // Käsk näidatakse ALATI, ka õnnestumisel: lõikelaud võib olla vahepeal üle
+  // kirjutatud ja siis on tekst siin endiselt olemas.
+  showSessMsg((ok ? 'Kopeeritud ✓ — kleebi terminali.'
+                  : 'Lõikelaud ei olnud lubatud — vali ja kopeeri käsitsi:')
+              + `<code>${esc(cmd)}</code>`, false);
+}
+
+async function sessAction(el){
+  const act = el.dataset.act;
+  if (act === 'attach'){ await copyLine(el.dataset.name); return; }
+  showSessMsg('Käivitan…', false);
+  try {
+    const body = act === 'chat' ? {kind:'chat'}
+                                : {kind:'project', project: el.dataset.project};
+    const r = await fetch('/api/tmux/new', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    const d = await r.json();
+    if (!d.ok){ showSessMsg(esc(d.error || 'ei õnnestunud'), true); return; }
+    await fetchTmux(); renderSessMenu();
+    await copyLine(d.session);
+    if (!d.created)
+      showSessMsg(sessMsg.innerHTML + '<br>Sessioon <strong>oli juba olemas</strong> — '
+                  + 'midagi uut ei käivitatud.', false);
+  } catch(e){ showSessMsg('server ei vasta', true); }
+}
+
+document.getElementById('sessMenuBody').onclick = e => {
+  const el = e.target.closest('.mi');
+  if (el) sessAction(el);
+};
+sessFilter.oninput = renderSessMenu;
+
+function toggleSessMenu(open){
+  sessMenu.hidden = !open;
+  document.getElementById('sessBtn').setAttribute('aria-expanded', String(open));
+  if (open){ sessFilter.value = ''; sessMsg.hidden = true; sessFilter.focus(); }
+}
+document.getElementById('sessBtn').onclick = async e => {
+  e.stopPropagation();
+  if (!sessMenu.hidden){ toggleSessMenu(false); return; }
+  toggleSessMenu(true);
+  await fetchTmux();          // sessioonid muutuvad — värske loend igal avamisel
+  renderSessMenu();
+};
+sessMenu.onclick = e => e.stopPropagation();
+document.addEventListener('click', () => toggleSessMenu(false));
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && !sessMenu.hidden) toggleSessMenu(false);
+});
+fetchTmux();                  // otsustab, kas nuppu üldse näidata
+
 document.getElementById('refreshBtn').onclick = load;
 document.getElementById('moreBtn').onclick = () => { showAll = !showAll; renderSessions(lastData); };
 document.getElementById('themeBtn').onclick = () => {
@@ -884,7 +1083,64 @@ load(); setInterval(load, 5000);
 """
 
 
+def _tmux_payload() -> dict:
+    """Sessioonivalija andmed. Küsitakse ainult siis, kui valija avatakse.
+
+    DEMO-režiimis lülitatakse valija välja, mitte ei anonümiseerita: tmux- ja
+    kaustanimed ON päris nimed ja neid ei saa nagu sessioone ümber sildistada.
+    """
+    if DEMO:
+        return {"enabled": False, "sessions": [], "projects": [],
+                "remoteHost": None, "error": None}
+    return {"enabled": True, **tmux_lib.collect()}
+
+
 class Handler(BaseHTTPRequestHandler):
+    # ---- Ohutus: /api/tmux/new on ainus endpoint, mis käivitab protsessi ----
+    #
+    # Server kuulab 127.0.0.1-l, aga see EI kaitse brauseri eest: iga lahtine
+    # veebileht võib teha päringu localhost'i. Seepärast kolm lukku.
+
+    def _local_origin_ok(self) -> str:
+        """"" kui päring tuleb sellelt lehelt endalt, muidu tõrke põhjus."""
+        allowed = {f"http://127.0.0.1:{self.server.server_port}",
+                   f"http://localhost:{self.server.server_port}"}
+        origin = self.headers.get("Origin")
+        # ⚠️ `file://` lehelt tuleb Origin: null — see on SÕNE "null", mitte
+        # puuduv päis. Valge nimekiri lükkab ta tagasi; ära asenda `in`-kontrolli
+        # tõeväärtuskontrolliga.
+        if origin is not None and origin not in allowed:
+            return "võõras Origin"
+        # DNS rebinding: võõras nimi, mis laheneb 127.0.0.1-le. Origin oleks siis
+        # küll võõras, aga Host on teine, sõltumatu lukk.
+        host = (self.headers.get("Host") or "").strip()
+        if host and host.split(":")[0] not in ("127.0.0.1", "localhost"):
+            return "võõras Host"
+        return ""
+
+    def _read_json_body(self) -> tuple[dict | None, int, str]:
+        """(payload, veakood, sõnum). Nõuab JSON Content-Type'i.
+
+        `application/json` sunnib cross-origin päringu preflighti; kuna
+        `do_OPTIONS` puudub, blokeerib brauser sellise päringu juba enne meid.
+        """
+        ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip()
+        if ctype != "application/json":
+            return None, 415, "nõuab Content-Type: application/json"
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return None, 400, "vigane Content-Length"
+        if n <= 0 or n > 4096:
+            return None, 400, "vigane keha suurus"
+        try:
+            payload = json.loads(self.rfile.read(n).decode("utf-8"))
+        except Exception:
+            return None, 400, "vigane JSON"
+        if not isinstance(payload, dict):
+            return None, 400, "keha peab olema objekt"
+        return payload, 0, ""
+
     def _send(self, code: int, ctype: str, body: bytes) -> None:
         self.send_response(code)
         self.send_header("Content-Type", ctype)
@@ -901,6 +1157,14 @@ class Handler(BaseHTTPRequestHandler):
             with _lock:
                 body = json.dumps(_cache, ensure_ascii=False).encode("utf-8")
             self._send(200, "application/json; charset=utf-8", body)
+        elif self.path == "/api/tmux":
+            # Tahtlikult ERALDI /api/data-st. `load()` teeb `!d.ok` peal
+            # `return`, seega ccusage'i viga peidaks kogu payload'i — ja koos
+            # sellega sessioonivalija, mis ccusage'ist üldse ei sõltu.
+            body = json.dumps(_tmux_payload(), ensure_ascii=False).encode("utf-8")
+            self._send(200, "application/json; charset=utf-8", body)
+        elif self.path.startswith("/api/tmux/"):
+            self._send(405, "text/plain; charset=utf-8", b"ainult POST")
         elif self.path.startswith("/open?"):
             # Dashboard elab omaette Chrome-profiilis (`--app` +
             # `--user-data-dir=~/.claude/.ccdash-chrome`), kus ei ole ühtegi
@@ -920,6 +1184,51 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, "text/html; charset=utf-8", PAGE.encode("utf-8"))
         else:
             self._send(404, "text/plain; charset=utf-8", b"not found")
+
+    def do_POST(self) -> None:  # noqa: N802
+        if self.path != "/api/tmux/new":
+            self._send(404, "text/plain; charset=utf-8", b"not found")
+            return
+        if DEMO:
+            self._json(403, {"ok": False, "error": "demo-režiimis välja lülitatud"})
+            return
+        why = self._local_origin_ok()
+        if why:
+            self._json(403, {"ok": False, "error": why})
+            return
+        payload, code, msg = self._read_json_body()
+        if payload is None:
+            self._json(code, {"ok": False, "error": msg})
+            return
+
+        kind = payload.get("kind")
+        project = payload.get("project")
+        if kind not in ("project", "chat") or (
+                kind == "project" and not isinstance(project, str)):
+            self._json(400, {"ok": False, "error": "vigane kind/project"})
+            return
+
+        # Kliendilt tuleb NIMI, mitte tee. Tee valib tmux_lib oma nimekirjast.
+        target, err = tmux_lib.resolve(kind, project)
+        if target is None:
+            self._json(400, {"ok": False, "error": err})
+            return
+        created, err = tmux_lib.start(target)
+        if err:
+            self._json(500, {"ok": False, "error": err})
+            return
+        self._json(200, {
+            "ok": True,
+            "created": created,          # False = sessioon oli juba olemas
+            "session": target["name"],
+            "display": target["display"],
+            "attach": tmux_lib.attach_lines(target["name"],
+                                            c.CONFIG.get("remoteHost") or None),
+        })
+
+    def _json(self, code: int, obj: dict) -> None:
+        self._send(code, "application/json; charset=utf-8",
+                   json.dumps(obj, ensure_ascii=False).encode("utf-8"))
 
     def log_message(self, *a) -> None:  # vaikne
         pass
