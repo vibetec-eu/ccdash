@@ -440,16 +440,43 @@ def _project_from_cwd(cwd: str) -> str | None:
     return None
 
 
+def _label_from_cwd(cwd: str | None) -> str | None:
+    """Loetav silt PÄRIS cwd-teest, kui ükski projektijuur ei sobinud.
+
+    Varem langeti siin tagasi Claude Code'i kaustanime (slug'i) peale, aga see
+    teisendus EI OLE pööratav — `.` ja `@` muutuvad samuti sidekriipsuks — ja
+    tulemuseks olid read nagu `Users/heikki//openclaw/w…`. Päris tee on
+    transkriptis olemas; sellest saab ausa nime ilma arvamiseta.
+    """
+    if not cwd or not cwd.startswith("/"):
+        return None
+    p = cwd.rstrip("/")
+    # macOS ajutised kaustad (`/var/folders` on symlink `/private/var/folders`-ile):
+    # nende viimane komponent on juhuslik räsi ja ei ütle mitte midagi.
+    if p.startswith("/private/var/folders/") or p.startswith("/var/folders/"):
+        return "(ajutine kaust)"
+    if p == str(Path.home()).rstrip("/"):
+        return GENERAL_LABEL
+    for root in _PROJECT_ROOTS:
+        if p == root.rstrip("/"):
+            return GENERAL_LABEL       # täpselt projektijuures = üldtöö
+    last = p.rsplit("/", 1)[-1]
+    return last or None
+
+
 def _scan_transcript(path: Path) -> dict:
-    """Leia failist domineeriv projekt ja viimane pealkiri."""
+    """Leia failist domineeriv projekt, domineeriv cwd ja viimane pealkiri."""
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return {"project": None, "title": None}
+        return {"project": None, "cwd": None, "title": None}
 
     counts: dict[str, int] = {}
+    cwds: dict[str, int] = {}
     for m in _CWD_RE.finditer(text):
-        proj = _project_from_cwd(m.group(1).replace("\\/", "/"))
+        raw = m.group(1).replace("\\/", "/")
+        cwds[raw] = cwds.get(raw, 0) + 1
+        proj = _project_from_cwd(raw)
         if proj:
             counts[proj] = counts.get(proj, 0) + 1
 
@@ -469,7 +496,8 @@ def _scan_transcript(path: Path) -> dict:
             break
 
     project = max(counts, key=counts.get) if counts else None
-    return {"project": project, "title": title, "ctx": ctx}
+    cwd = max(cwds, key=cwds.get) if cwds else None
+    return {"project": project, "cwd": cwd, "title": title, "ctx": ctx}
 
 
 def session_meta() -> dict[str, dict]:
@@ -504,7 +532,7 @@ def session_meta() -> dict[str, dict]:
             # muutmise järel kehtima vana tulemus ja katkine loogika avastataks alles
             # nädalate pärast, kui failid ise muutuvad. Tõsta seda, kui _scan_transcript
             # või _project_from_cwd loogika muutub.
-            sig = f"v2:{int(st.st_mtime)}:{st.st_size}"
+            sig = f"v3:{int(st.st_mtime)}:{st.st_size}"
             hit = cache.get(sid)
             if hit and hit.get("sig") == sig:
                 info = hit
@@ -513,8 +541,13 @@ def session_meta() -> dict[str, dict]:
                 cache[sid] = info
                 dirty = True
             out[sid] = {
-                # cwd-põhine nimi on täpsem; kaustanimi jääb varuks
-                "project": info.get("project") or fallback,
+                # Kolm astet, täpsemast lõdvemani:
+                #   1. projektijuurele vastav nimi (`_project_from_cwd`)
+                #   2. loetav silt päris cwd-teest (`_label_from_cwd`)
+                #   3. kaustanimi ehk slug — ainult siis, kui cwd-d ei ole
+                "project": (info.get("project")
+                            or _label_from_cwd(info.get("cwd"))
+                            or fallback),
                 "title": info.get("title"),
                 "ctx": info.get("ctx") or 0,
             }
