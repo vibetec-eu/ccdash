@@ -86,10 +86,19 @@ Removal: `./uninstall.sh` — your log and config are kept.
 
 | Field | Effect |
 |---|---|
-| `projectRoots` | Directories whose subdirectories are projects. **List every tree** where your projects live. |
+| `projectRoots` | Directories whose subdirectories are projects. **List every tree** where your projects live. **Order matters** — see below. |
+| `remoteHost` | Host name you reach this machine through (`ssh <host>`). Adds the `ssh -t <host> "tmux attach …"` variant to the session picker. Omit it and only the local command is offered. |
 | `timezone` | Day-boundary grouping. Defaults to the system zone. |
 | `thresholds.monthEur` | Monthly warning threshold shown on the dashboard (EUR). |
 | `thresholds.dayUsd` / `monthUsd` | Thresholds for the daily logger's macOS notification (USD). |
+
+**Order matters when a name appears in two roots.** The session picker lists the
+subdirectories of every root, and a project name can legitimately exist twice — say
+`~/dev/thing` (the repo) and `~/Projects/thing` (its notes). Two identical rows would be a
+riddle, and one of them would open a terminal in the wrong place, so **duplicates are
+dropped and the first root wins**. Put the tree you actually work in first. Cost
+attribution is unaffected: both paths report the same project name, which is correct —
+they are the same project.
 
 **Why `projectRoots` has to be listed by hand.** Claude Code stores transcripts in a
 directory named after a slug of the working path: `/Users/x/Projects/web` becomes
@@ -119,6 +128,45 @@ field and are free-form sentences about real work.
 `~/.claude/logs/token-usage-daily.log`. That file is the **only durable usage history** —
 `ccusage` loses old days and they cannot be reconstructed. Don't delete it, and don't try
 to "rebuild it from `ccusage`".
+
+### Sessions you cannot otherwise see
+
+Claude Code has two kinds of session that a terminal tab does not show you, and both cost
+money while you are not looking. ccdash surfaces them in the header.
+
+**Background jobs** (`claude --bg`) run in a daemon with no terminal at all. They appear in
+neither the editor's tab bar nor `/tasks`; the only places they exist are `claude agents`
+and `~/.claude/jobs/<id>/state.json`. Four of them once sat blocked for weeks.
+
+- A **waiting bar** appears at the top of the page — and *only* when something is actually
+  waiting. It shows the id, what the job is waiting for, how many days it has been stuck,
+  and a copyable `claude attach <id>`.
+- Existing session rows carry `bg`, `no tty`, `⏳ waiting` and `web ↗` badges.
+- The state is read from `state.json` on every refresh (~33 ms) but `claude agents --json`
+  is the **authority** on `state` and is consulted at most every 5 minutes — a job's
+  `state.json` can be stale (measured: "working" in the file, "blocked" per the CLI).
+- A job counts as waiting when `state == blocked` **or** `needs` is set. `needs` alone is
+  not enough: blocked jobs have been observed whose `needs` had gone empty.
+
+**The session picker** (`Sessions ▾`) lists the tmux sessions running on this machine —
+click one to copy its `tmux attach` line — then every project under `projectRoots`, then
+`+ new chat` for work that belongs to no project. Clicking a project **starts** the session
+here (`tmux new-session` in the project directory, running `claude` through a login shell)
+and hands you the attach command. An already-running session is never touched: no keys are
+sent into a live Claude prompt.
+
+The toggle at the top of the menu decides whether the copied line is prefixed with
+`ssh -t <remoteHost>`. Turn it on when your terminal is already on this machine (an
+editor's remote-SSH terminal), off when it is somewhere else. The choice is remembered.
+
+> **This is the one endpoint that starts a process,** so it is worth knowing how it is
+> fenced. The browser never sends a path — it sends a project *name*, and the path is
+> looked up server-side from the configured roots. The session name is derived on the
+> server and must pass a strict allowlist. `POST` requires `Content-Type: application/json`
+> (which forces a CORS preflight that is never answered) plus `Origin` and `Host`
+> allowlists. Demo mode disables the picker entirely. **What none of this stops** is a
+> browser extension with broad permissions: extensions bypass CORS, and no localhost
+> server can prevent that.
 
 ### What it does not do
 
@@ -204,10 +252,19 @@ Eemaldus: `./uninstall.sh` — logi ja seadistus jäävad alles.
 
 | Väli | Mida teeb |
 |---|---|
-| `projectRoots` | Kaustad, mille alamkaustad on projektid. **Loetle kõik puud**, kus projektid elavad. |
+| `projectRoots` | Kaustad, mille alamkaustad on projektid. **Loetle kõik puud**, kus projektid elavad. **Järjekord loeb** — vt allpool. |
+| `remoteHost` | Masinanimi, mille kaudu sa selle masinani jõuad (`ssh <host>`). Lisab sessioonivalijasse variandi `ssh -t <host> "tmux attach …"`. Puudumisel pakutakse ainult kohalikku käsku. |
 | `timezone` | Päevade grupeerimine. Puudumisel süsteemi oma. |
 | `thresholds.monthEur` | Kuu hoiatuslävi dashboardil (EUR). |
 | `thresholds.dayUsd` / `monthUsd` | Päevalogija macOS-teate läved (USD). |
+
+**Järjekord loeb, kui sama nimi on kahes juures.** Sessioonivalija loetleb iga juure
+alamkaustad ja projektinimi võib ausalt esineda kaks korda — näiteks `~/dev/asi` (repo) ja
+`~/Projects/asi` (selle märkmed). Kaks ühesugust rida oleks kasutajale mõistatus ja üks
+neist avaks terminali vales kohas, seega **kordused visatakse välja ja esimene juur
+võidab**. Pane ettepoole see puu, kus sa päriselt töötad. Kulude omistamist projektidele
+see ei puuduta: mõlemad teed annavad sama projektinime, mis ongi õige — tegu on ühe
+projektiga.
 
 **Miks `projectRoots` tuleb käsitsi loetleda.** Claude Code hoiab transkripte kaustanime
 järgi, kus teest on tehtud slug: `/Users/x/Projects/veeb` → `-Users-x-Projects-veeb`.
@@ -236,6 +293,46 @@ jäävad päris. Mõeldud ekraanipildi või esitluse jaoks — sessioonipealkirj
 `~/.claude/logs/token-usage-daily.log`.
 See on **ainus püsiv kasutusajalugu** — `ccusage` kaotab vanad päevad ja neid ei saa
 taastada. Ära kustuta seda faili ega "ehita uuesti üles".
+
+### Sessioonid, mida sa mujalt ei näe
+
+Claude Code'il on kaht sorti sessioone, mida terminali tabiriba ei näita, ja mõlemad
+maksavad raha ajal, mil sa neid ei vaata. ccdash toob nad päisesse.
+
+**Taustatööd** (`claude --bg`) jooksevad daemonis, ilma igasuguse terminalita. Neid ei ole
+ei redaktori tabiribal ega `/tasks` all; ainsad kohad, kus nad eksisteerivad, on
+`claude agents` ja `~/.claude/jobs/<id>/state.json`. Neli sellist seisis kord nädalaid
+blokeerituna.
+
+- Lehe tippu ilmub **ootajate riba** — ja ainult siis, kui keegi päriselt ootab. Seal on
+  id, mida töö ootab, mitu päeva ta on seisnud, ja kopeeritav `claude attach <id>`.
+- Olemasolevatel sessiooniridadel on märgid `bg`, `tabita`, `⏳ ootab` ja `veeb ↗`.
+- Seisu loetakse `state.json`-ist igal värskendusel (~33 ms), aga `state` välja
+  **autoriteet** on `claude agents --json`, mida küsitakse maksimaalselt iga 5 minuti
+  tagant — töö `state.json` võib olla aegunud (mõõdetud: failis „working", CLI järgi
+  „blocked").
+- Töö on ootaja, kui `state == blocked` **või** `needs` on täidetud. Ainult `needs`-ist ei
+  piisa: nähtud on blokeeritud töid, mille `needs` oli vahepeal tühjaks läinud.
+
+**Sessioonivalija** (`Sessioonid ▾`) loetleb selles masinas jooksvad tmux-sessioonid —
+klikk kopeerib nende `tmux attach` rea —, siis kõik projektid `projectRoots` alt, siis
+`+ uus chat` töö jaoks, mis ei kuulu ühessegi projekti. Klikk projektil **käivitab**
+sessiooni siin (`tmux new-session` projektikaustas, `claude` login-shelli kaudu) ja annab
+attach-käsu. Juba jooksvat sessiooni ei puututa kunagi: ühtegi klahvi ei saadeta elava
+Claude'i sisendisse.
+
+Menüü ülaosa lüliti otsustab, kas kopeeritava rea ees on `ssh -t <remoteHost>`. Pane sisse,
+kui su terminal on juba selles masinas (redaktori remote-SSH terminal), välja siis, kui ta
+on mujal. Valik jääb meelde.
+
+> **See on ainus endpoint, mis käivitab protsessi,** seega tasub teada, kuidas ta on
+> piiratud. Brauser ei saada kunagi teed — ta saadab projekti *nime* ja tee otsitakse
+> serveris seadistatud juurte hulgast. Sessiooninimi tuletatakse serveris ja peab läbima
+> range valge nimekirja. `POST` nõuab `Content-Type: application/json` (mis sunnib
+> CORS-preflighti, millele kunagi ei vastata) ning `Origin` ja `Host` valget nimekirja.
+> Demo-režiimis on valija täielikult väljas. **Mida see kõik EI peata:** laia õigusega
+> brauserilaiendus — laiendused lähevad CORS-ist mööda ja ükski localhost-server ei saa
+> seda takistada.
 
 ### Mida see EI tee
 

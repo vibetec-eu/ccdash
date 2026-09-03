@@ -1,12 +1,11 @@
 {
   "_comment": "Kopeeri ~/.claude/ccdash.config.json ja täida projectRoots oma masina järgi. Kõik väljad on valikulised.",
-
   "_timezone": "Ajavöönd, milles päevad grupeeritakse. Puudumisel süsteemi oma (/etc/localtime).",
   "timezone": "Europe/Tallinn",
-
-  "_projectRoots": "Kaustad, mille ALL olevad alamkaustad on projektid. Sessiooni projekt loetakse transkripti cwd-väljast: esimene osa juure järel ongi projektinimi. Loetle KÕIK puud, kus projektid elavad (kohalik kaust, pilvemount, teine kasutajakonto) — tuletada neid ei saa. Tühi loend = jääb ainult Claude Code'i kaustanimi.",
+  "_projectRoots": "Kaustad, mille ALL olevad alamkaustad on projektid. Sessiooni projekt loetakse transkripti cwd-väljast: esimene osa juure järel ongi projektinimi. Loetle KÕIK puud, kus projektid elavad (kohalik kaust, pilvemount, teine kasutajakonto) — tuletada neid ei saa. Tühi loend = jääb ainult Claude Code'i kaustanimi. JÄRJEKORD LOEB: sessioonivalija viskab samanimelised kordused välja ja esimene juur võidab.",
   "projectRoots": [],
-
+  "_remoteHost": "Masinanimi, mille kaudu sa selle masinani jõuad (ssh <host>). Sessioonivalija pakub siis ka varianti `ssh -t <host> \"tmux attach …\"`. Puudumisel pakutakse ainult kohalikku `tmux attach`.",
+  "remoteHost": "",
   "_thresholds": "Hoiatusläved. monthEur kuvatakse dashboardil, dayUsd ja monthUsd käivitavad päevalogija macOS-teate.",
   "thresholds": {
     "monthEur": 300.0,
