@@ -88,6 +88,7 @@ Removal: `./uninstall.sh` — your log and config are kept.
 |---|---|
 | `projectRoots` | Directories whose subdirectories are projects. **List every tree** where your projects live. **Order matters** — see below. |
 | `remoteHost` | Host name you reach this machine through (`ssh <host>`). Adds the `ssh -t <host> "tmux attach …"` variant to the session picker. Omit it and only the local command is offered. |
+| `peers` | Other machines that also run Claude Code, as ssh host aliases (`["mini"]`). Their `~/.claude/projects` is mirrored here and counted — see **Multiple machines** below. |
 | `timezone` | Day-boundary grouping. Defaults to the system zone. |
 | `thresholds.monthEur` | Monthly warning threshold shown on the dashboard (EUR). |
 | `thresholds.dayUsd` / `monthUsd` | Thresholds for the daily logger's macOS notification (USD). |
@@ -99,6 +100,19 @@ riddle, and one of them would open a terminal in the wrong place, so **duplicate
 dropped and the first root wins**. Put the tree you actually work in first. Cost
 attribution is unaffected: both paths report the same project name, which is correct —
 they are the same project.
+
+**Multiple machines (`peers`).** If Claude Code runs on more than one computer, each one
+writes its own `~/.claude/projects`, and ccusage only reads the local tree — so a dashboard
+on either machine shows a fraction of the truth (measured: two machines, almost exactly
+half each). With `peers` set, ccdash rsyncs every listed host's `~/.claude/projects` into
+`~/.claude/peers/<host>/projects/` every 5 minutes and hands ccusage both trees through a
+comma-separated `CLAUDE_CONFIG_DIR`. ccusage deduplicates sessions, so nothing is counted
+twice. Requirements: passwordless `ssh <host>` (the alias from your `~/.ssh/config`) and
+`rsync` on both ends. The copy is persistent: if the peer is unreachable, the last copy
+stays in use and the dashboard shows how old it is (yellow card after 30 minutes). Set
+`peers` on both machines pointing at each other and whichever dashboard you open shows the
+total. The daily logger refreshes the copy too, so the archive holds the combined figure.
+Nothing is deleted from the copy — a session removed on the peer stays here as archive.
 
 **Why `projectRoots` has to be listed by hand.** Claude Code stores transcripts in a
 directory named after a slug of the working path: `/Users/x/Projects/web` becomes
@@ -254,6 +268,7 @@ Eemaldus: `./uninstall.sh` — logi ja seadistus jäävad alles.
 |---|---|
 | `projectRoots` | Kaustad, mille alamkaustad on projektid. **Loetle kõik puud**, kus projektid elavad. **Järjekord loeb** — vt allpool. |
 | `remoteHost` | Masinanimi, mille kaudu sa selle masinani jõuad (`ssh <host>`). Lisab sessioonivalijasse variandi `ssh -t <host> "tmux attach …"`. Puudumisel pakutakse ainult kohalikku käsku. |
+| `peers` | Teised masinad, kus Claude Code samuti jookseb, ssh-aliastena (`["mini"]`). Nende `~/.claude/projects` peegeldatakse siia ja loetakse kokku — vt **Mitu masinat** allpool. |
 | `timezone` | Päevade grupeerimine. Puudumisel süsteemi oma. |
 | `thresholds.monthEur` | Kuu hoiatuslävi dashboardil (EUR). |
 | `thresholds.dayUsd` / `monthUsd` | Päevalogija macOS-teate läved (USD). |
@@ -265,6 +280,19 @@ neist avaks terminali vales kohas, seega **kordused visatakse välja ja esimene 
 võidab**. Pane ettepoole see puu, kus sa päriselt töötad. Kulude omistamist projektidele
 see ei puuduta: mõlemad teed annavad sama projektinime, mis ongi õige — tegu on ühe
 projektiga.
+
+**Mitu masinat (`peers`).** Kui Claude Code jookseb rohkem kui ühes arvutis, kirjutab
+igaüks oma `~/.claude/projects` ja ccusage loeb ainult kohalikku puud — kummagi masina
+dashboard näitab siis osa tõest (mõõdetud: kaks masinat, peaaegu täpselt pool kumbki).
+`peers` seadistusega rsync'ib ccdash iga loetletud hosti `~/.claude/projects` kausta
+`~/.claude/peers/<host>/projects/` iga 5 minuti järel ja annab ccusage'ile mõlemad puud
+komaga eraldatud `CLAUDE_CONFIG_DIR`-is. ccusage dedupib sessioonid, midagi ei loeta
+topelt. Eeldused: paroolita `ssh <host>` (alias sinu `~/.ssh/config`-ist) ja `rsync`
+mõlemas otsas. Koopia on püsiv: kui teine masin ei vasta, jääb viimane koopia kasutusse ja
+dashboard näitab, kui vana see on (kollane kaart alates 30 minutist). Sea `peers` mõlemas
+masinas teineteise peale ja kumb dashboard sa ka avad, näitab see kogusummat. Ka
+päevalogija värskendab koopia, seega arhiivis on koondsumma. Koopiast ei kustutata
+midagi — teises masinas kustutatud sessioon jääb siia arhiivina alles.
 
 **Miks `projectRoots` tuleb käsitsi loetleda.** Claude Code hoiab transkripte kaustanime
 järgi, kus teest on tehtud slug: `/Users/x/Projects/veeb` → `-Users-x-Projects-veeb`.

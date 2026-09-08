@@ -38,6 +38,7 @@ _CLAUDE_SESSION_URL = re.compile(r"https://claude\.ai/code/session_[A-Za-z0-9_-]
 REFRESH_SEC = 20
 ACTIVE_WINDOW_SEC = 10 * 60      # roheline täpp: tegevus <10 min tagasi
 WORK_WINDOW_SEC = 4 * 3600       # "töös": käimasolev tööseanss, mille juurde naased
+PEER_SYNC_SEC = 300          # teise masina `~/.claude/projects` koopia värskendus
 IDLE_AFTER_SEC = 90          # kui keegi pole nii kaua pollinud, lõpeta värskendamine
 # Kuu hoiatuslävi eurodes (kuvamiseks ümmargune). Seadistus: ccdash.config.json
 # -> thresholds.monthEur.
@@ -219,6 +220,7 @@ def collect() -> dict:
         "fetchedAt": c.now().isoformat(),
         "fetchedLabel": c.now().strftime("%H:%M:%S"),
         "offlinePricing": bool(used_offline),
+        "peers": c.peers_status(),
         "today": {"date": today, "cost": today_cost, "tokens": today_tokens},
         # Lävi on ümmargune EUR-summa; hoiame teda USD-s, sest kõik muud summad
         # tulevad ccusage'ist USD-s ja teisendus toimub alles kuvamisel.
@@ -233,6 +235,18 @@ def collect() -> dict:
         "sessionCount": len(sessions),
         "jobs": jobs,
     }
+
+
+def peer_syncer() -> None:
+    """Tõmba teiste masinate transkriptikoopiad iga PEER_SYNC_SEC järel.
+
+    Eraldi lõim, mitte `collect()`-i osa: ssh üle Tailscale'i võib venida või aeguda ja
+    see ei tohi dashboardi värskendust kinni hoida. `sync_peers()` ei tõsta erindit.
+    Jookseb ka siis, kui keegi ei vaata — 09:00 päevalogija vajab värsket koopiat.
+    """
+    while True:
+        c.sync_peers()
+        time.sleep(PEER_SYNC_SEC)
 
 
 def refresher() -> None:
@@ -911,11 +925,23 @@ async function load(){
         `<div class="card err" style="margin-bottom:14px"><strong>ccusage ei anna andmeid:</strong> ${d.error}</div>`;
       return;
     }
-    document.getElementById('errBox').innerHTML = d.offlinePricing
-      ? `<div class="card" style="margin-bottom:14px;border-color:var(--warning)">
-           Hinnakiri tuli <strong>offline-vahemälust</strong> — võrgutõmme ebaõnnestus. Numbrid võivad olla veidi vanad.</div>`
-      : '';
-    st.innerHTML = `<span class="dot"></span>uuendatud ${d.fetchedLabel}`;
+    // Hoiatused LIIDETAKSE, mitte kas-või: offline-hinnakiri ja peer'i vana koopia
+    // võivad kehtida korraga ja kumbki ei tohi teist varjata.
+    const warns = [];
+    if (d.offlinePricing) warns.push(
+      `<div class="card" style="margin-bottom:14px;border-color:var(--warning)">
+         Hinnakiri tuli <strong>offline-vahemälust</strong> — võrgutõmme ebaõnnestus. Numbrid võivad olla veidi vanad.</div>`);
+    for (const p of (d.peers || [])){
+      if (!p.stale) continue;
+      const when = p.at ? `viimane koopia ${p.at.slice(11,16)} (${p.ageMin} min tagasi)` : 'koopiat ei ole veel';
+      warns.push(
+        `<div class="card" style="margin-bottom:14px;border-color:var(--warning)">
+           <strong>${p.host}</strong> tokenid võivad olla puudu — ${when}${p.error ? ' · ' + p.error : ''}</div>`);
+    }
+    document.getElementById('errBox').innerHTML = warns.join('');
+    const peerNote = (d.peers || []).filter(p => !p.stale)
+      .map(p => ` · ${p.host} koopia ${p.at.slice(11,16)}`).join('');
+    st.innerHTML = `<span class="dot"></span>uuendatud ${d.fetchedLabel}${peerNote}`;
     fxRate = (d.fx && d.fx.rate) || fxRate;
     document.getElementById('fxNote').textContent =
       `1 € = ${fxRate} $ (${d.fx ? d.fx.source : '?'}${d.fx ? ', ' + d.fx.date : ''})`;
@@ -1241,6 +1267,8 @@ def main() -> int:
     args = ap.parse_args()
 
     threading.Thread(target=refresher, daemon=True).start()
+    if c.PEERS:
+        threading.Thread(target=peer_syncer, daemon=True).start()
 
     try:
         srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)

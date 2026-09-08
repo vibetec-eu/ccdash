@@ -6,6 +6,8 @@
   "projectRoots": [],
   "_remoteHost": "Masinanimi, mille kaudu sa selle masinani jõuad (ssh <host>). Sessioonivalija pakub siis ka varianti `ssh -t <host> \"tmux attach …\"`. Puudumisel pakutakse ainult kohalikku `tmux attach`.",
   "remoteHost": "",
+  "_peers": "Teised masinad, kus Claude Code jookseb, ssh-aliastena. Nende ~/.claude/projects peegeldatakse kausta ~/.claude/peers/<host>/ ja loetakse kokku (ccusage dedupib). Vajab paroolita ssh + rsync. Tühi = ainult see masin.",
+  "peers": [],
   "_thresholds": "Hoiatusläved. monthEur kuvatakse dashboardil, dayUsd ja monthUsd käivitavad päevalogija macOS-teate.",
   "thresholds": {
     "monthEur": 300.0,

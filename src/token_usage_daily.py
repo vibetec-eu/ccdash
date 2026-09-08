@@ -94,6 +94,10 @@ def main() -> int:
     today = c.today_str()
     target = args.date or (c.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
+    # Teiste masinate koopia värskeks ENNE lugemist — muidu sõltuks päevalogi sellest,
+    # kas ccdash-server juhtus öösel joosta. Ei tõsta erindit; vana koopia jääb.
+    c.sync_peers()
+
     try:
         daily, used_offline = c.fetch_daily()
     except c.CcusageError as e:

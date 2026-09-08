@@ -44,7 +44,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-PROJECTS_DIR = Path.home() / ".claude" / "projects"
+# Kohalik transkriptipuu on `projects_dirs()[0]`; peer-koopiad tulevad sinna järele (vt „Mitu masinat").
 LOG_PATH = Path.home() / ".claude" / "logs" / "token-usage-daily.log"
 
 # --- Seadistus -------------------------------------------------------------
@@ -89,6 +89,114 @@ def threshold(name: str, default: float) -> float:
         return float((CONFIG.get("thresholds") or {}).get(name, default))
     except (TypeError, ValueError):
         return default
+
+
+# --- Mitu masinat (`peers`) -------------------------------------------------
+# Claude Code jookseb Heikkil kahel masinal (Air + Mini) ja kumbki kirjutab oma
+# `~/.claude/projects` alla. ccusage loeb ainult kohalikku puud, seega näitas dashboard
+# POOLT tegelikust (mõõdetud 08.09.2026: Air $317 + Mini $309 septembris).
+#
+# Lahendus on sümmeetriline: iga masin tõmbab rsync'iga teise masina `~/.claude/projects`
+# koopia kausta `~/.claude/peers/<host>/projects/` ja annab ccusage'ile MÕLEMAD puud
+# komaga eraldatud `CLAUDE_CONFIG_DIR`-is. ccusage dedupib sama sessiooni (kontrollitud:
+# sama kaust kaks korda = sama summa), seega topeltlugemist ei teki.
+#
+# Koopia on püsiv: kui teine masin ei vasta, jääb viimane koopia kasutusse ja
+# dashboard ütleb, kui vana see on. Sünk EI kasuta `--delete` — teises masinas
+# kustutatud sessioon jääb siia arhiivina alles ja ccusage loeb seda edasi.
+PEERS = tuple(h for h in (CONFIG.get("peers") or []) if isinstance(h, str) and h)
+PEERS_DIR = Path.home() / ".claude" / "peers"
+PEERS_STATE = Path.home() / ".claude" / "logs" / "peers.json"
+PEER_SYNC_TIMEOUT = 600      # esimene täiskoopia (~50 MB üle Tailscale'i) võib võtta minuteid
+PEER_STALE_MIN = 30          # vanem õnnestunud koopia = hoiatus dashboardil
+
+
+def config_dirs() -> list[Path]:
+    """Kõik `.claude`-puud, mida ccusage peab lugema: kohalik + olemasolevad peer-koopiad.
+
+    Dünaamiline, mitte konstant: peer'i kaust tekib alles esimese õnnestunud sünkiga.
+    """
+    dirs = [Path.home() / ".claude"]
+    for host in PEERS:
+        d = PEERS_DIR / host
+        if (d / "projects").is_dir():
+            dirs.append(d)
+    return dirs
+
+
+def projects_dirs() -> list[Path]:
+    return [d / "projects" for d in config_dirs()]
+
+
+def sync_peers() -> dict[str, dict]:
+    """rsync iga peer'i `~/.claude/projects` → `PEERS_DIR/<host>/projects`.
+
+    Ei tõsta kunagi erindit: iga peer saab `{"ok", "at", "error"}` ja tulemus kirjutatakse
+    `PEERS_STATE`-i, et dashboard ja päevalogija näeksid sama seisu. Ebaõnnestunud sünk
+    jätab vana koopia puutumata (rsync kirjutab faili kaupa atomaarselt).
+    """
+    state = _read_peers_state()
+    for host in PEERS:
+        dest = PEERS_DIR / host / "projects"
+        entry = dict(state.get(host) or {})
+        try:
+            dest.mkdir(parents=True, exist_ok=True)
+            cmd = ["rsync", "-a", "--timeout=20",
+                   "-e", "ssh -o ConnectTimeout=5 -o BatchMode=yes",
+                   f"{host}:.claude/projects/", f"{dest}/"]
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=PEER_SYNC_TIMEOUT)
+            if p.returncode == 0:
+                entry = {"ok": True, "at": now().isoformat(), "error": None}
+            else:
+                tail = (p.stderr or "").strip().splitlines()[-1:] or ["rsync kukkus"]
+                entry.update({"ok": False, "error": f"rc={p.returncode}: {tail[0][:160]}"})
+        except subprocess.TimeoutExpired:
+            entry.update({"ok": False, "error": f"rsync aegus ({PEER_SYNC_TIMEOUT}s)"})
+        except OSError as e:
+            entry.update({"ok": False, "error": f"{type(e).__name__}: {e}"})
+        entry.setdefault("at", None)
+        state[host] = entry
+    try:
+        PEERS_STATE.parent.mkdir(parents=True, exist_ok=True)
+        PEERS_STATE.write_text(json.dumps(state), encoding="utf-8")
+    except OSError:
+        pass
+    return state
+
+
+def _read_peers_state() -> dict[str, dict]:
+    try:
+        st = json.loads(PEERS_STATE.read_text(encoding="utf-8"))
+        return st if isinstance(st, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def peers_status() -> list[dict]:
+    """Dashboardi payload: [{host, ok, at, ageMin, stale, error}] iga seadistatud peer'i kohta.
+
+    `at` on VIIMASE ÕNNESTUNUD koopia aeg — ebaõnnestunud katse seda ei nulli, sest just
+    see ütleb, kui vanad teise masina numbrid praegu on.
+    """
+    state = _read_peers_state()
+    out = []
+    for host in PEERS:
+        e = state.get(host) or {}
+        age = None
+        if e.get("at"):
+            try:
+                age = (now() - datetime.fromisoformat(e["at"])).total_seconds() / 60
+            except ValueError:
+                age = None
+        out.append({
+            "host": host,
+            "ok": bool(e.get("ok")),
+            "at": e.get("at"),
+            "ageMin": round(age) if age is not None else None,
+            "stale": age is None or age > PEER_STALE_MIN or not e.get("ok"),
+            "error": e.get("error"),
+        })
+    return out
 
 # --- Valuuta ---------------------------------------------------------------
 # ccusage arvutab kulu Anthropicu API listihinnast, mis on ALATI USD-s. Euroala
@@ -196,8 +304,13 @@ def _run(args: list[str], offline: bool) -> dict:
         cmd += ["--config", str(CCUSAGE_CONFIG)]
     if offline:
         cmd.append("--offline")
+    # Ilma `peers`-ita jääb keskkond puutumata — ccusage otsib siis ise oma vaikekaustad.
+    env = None
+    if PEERS:
+        env = {**os.environ, "CLAUDE_CONFIG_DIR": ",".join(str(d) for d in config_dirs())}
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=CCUSAGE_TIMEOUT)
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=CCUSAGE_TIMEOUT,
+                           env=env)
     except subprocess.TimeoutExpired as e:
         raise CcusageError(f"ccusage aegus ({CCUSAGE_TIMEOUT}s): {' '.join(args)}") from e
     if p.returncode != 0 or not p.stdout.strip():
@@ -513,12 +626,11 @@ def session_meta() -> dict[str, dict]:
     out: dict[str, dict] = {}
     dirty = False
 
-    if not PROJECTS_DIR.is_dir():
-        return out
-
-    for proj_dir in PROJECTS_DIR.iterdir():
-        if not proj_dir.is_dir():
-            continue
+    # Kohalik puu + peer-koopiad. Sama sessioon võib olla mõlemas (ccusage dedupib
+    # kulu); siin võidab esimene ehk kohalik, sest tema fail on värskem.
+    proj_dirs = [d for root in projects_dirs() if root.is_dir()
+                 for d in root.iterdir() if d.is_dir()]
+    for proj_dir in proj_dirs:
         fallback = _pretty_project(proj_dir.name)
         for entry in proj_dir.glob("*.jsonl"):
             sid = entry.stem
@@ -540,6 +652,8 @@ def session_meta() -> dict[str, dict]:
                 info = {**_scan_transcript(entry), "sig": sig}
                 cache[sid] = info
                 dirty = True
+            if sid in out:
+                continue                              # kohalik koopia võitis
             out[sid] = {
                 # Kolm astet, täpsemast lõdvemani:
                 #   1. projektijuurele vastav nimi (`_project_from_cwd`)
@@ -569,12 +683,9 @@ def session_project_map() -> dict[str, str]:
     korjamisest.
     """
     out: dict[str, str] = {}
-    if not PROJECTS_DIR.is_dir():
-        return out
     uuid_re = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
-    for proj in PROJECTS_DIR.iterdir():
-        if not proj.is_dir():
-            continue
+    for proj in (d for root in projects_dirs() if root.is_dir()
+                 for d in root.iterdir() if d.is_dir()):
         name = _pretty_project(proj.name)
         for entry in proj.iterdir():
             stem = entry.name[:-6] if entry.name.endswith(".jsonl") else entry.name
