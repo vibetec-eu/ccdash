@@ -111,6 +111,44 @@ PEER_SYNC_TIMEOUT = 600      # esimene täiskoopia (~50 MB üle Tailscale'i) võ
 PEER_STALE_MIN = 30          # vanem õnnestunud koopia = hoiatus dashboardil
 
 
+# --- Võõrad allikad ---------------------------------------------------------
+# ccusage avastab ISE ka OpenClaw'i sessioonid (`~/.openclaw/agents/*/sessions/*.jsonl`)
+# ja märgistab need mudelinimega `[openclaw] <mudel>`. OpenClaw kirjutab kulu nullina — ta
+# ei arvuta seda ja ccusage annab nulli muutmata edasi. Valve `_rows_look_priced` pidas
+# seda hinnakirja kaoks ja tappis kogu dashboardi (30.08–08.09.2026, 8,07 M tokenit).
+#
+# SULETUD loend meelega: tundmatu silt (nt `[bedrock] claude-opus-5`) tähendab endiselt
+# hinnakirja kadu ja viskab vea. Lahtine muster `^\[.*\] ` oleks andnud etteulatuvalt loa
+# kõigile tulevastele siltidele ja lammutanud lõks 1b kaitse (oponent 04.09.2026).
+# Ülekirjutatav: `ccdash.config.json` → `"externalSources": ["openclaw"]`.
+KNOWN_EXTERNAL_SOURCES = frozenset(
+    s for s in (CONFIG.get("externalSources") or ["openclaw"]) if isinstance(s, str) and s)
+_EXTERNAL_RE = re.compile(r"^\[([^\]]+)\]\s")
+
+
+def _external_source(model_name: str | None) -> str | None:
+    """'[openclaw] claude-opus-4-8' -> 'openclaw'; tundmatu silt või silt puudub -> None."""
+    m = _EXTERNAL_RE.match(model_name or "")
+    if m and m.group(1) in KNOWN_EXTERNAL_SOURCES:
+        return m.group(1)
+    return None
+
+
+def external_unpriced(rows: list[dict]) -> dict[str, int]:
+    """{allikas: tokenid}, mis on numbrites sees, aga hinnata (kulu 0).
+
+    Kutsu AINULT `daily` ridade peal — `session` kirjeldab sama kasutust ja summa
+    tuleks topelt (oponent 04.09).
+    """
+    out: dict[str, int] = {}
+    for r in rows:
+        for b in r.get("modelBreakdowns") or []:
+            src = _external_source(b.get("modelName"))
+            if src and _breakdown_tokens(b) > 0 and (b.get("cost") or 0) == 0:
+                out[src] = out.get(src, 0) + _breakdown_tokens(b)
+    return out
+
+
 def config_dirs() -> list[Path]:
     """Kõik `.claude`-puud, mida ccusage peab lugema: kohalik + olemasolevad peer-koopiad.
 
@@ -345,6 +383,8 @@ def _rows_look_priced(rows: list[dict]) -> bool:
         breakdowns = r.get("modelBreakdowns") or []
         if breakdowns:
             for b in breakdowns:
+                if _external_source(b.get("modelName")):
+                    continue                          # võõras allikas — kulu EI SAAGI olla
                 if _breakdown_tokens(b) > 0 and (b.get("cost") or 0) == 0:
                     return False
         elif (r.get("totalCost") or 0) == 0:
@@ -366,6 +406,8 @@ def _unpriced(rows: list[dict], limit: int = 5) -> list[str]:
         if not breakdowns and (r.get("totalCost") or 0) == 0:
             out.append(f"{r.get('period')} (kogu rida)")
         for b in breakdowns:
+            if _external_source(b.get("modelName")):
+                continue
             if _breakdown_tokens(b) > 0 and (b.get("cost") or 0) == 0:
                 out.append(f"{r.get('period')} {b.get('modelName') or '?'}")
         if len(out) >= limit:
@@ -701,6 +743,10 @@ def enrich_sessions(sessions: list[dict]) -> list[dict]:
     for s in sessions:
         sid = s.get("period") or ""
         m = meta.get(sid, {})
+        # Võõra tööriista sessioon (`agent: "openclaw"`) ei ela ~/.claude/projects all,
+        # seega meta't ei ole — nimeta allika järgi, mitte „(tundmatu)" $0.00 reana.
+        agent = s.get("agent")
+        source = agent if agent in KNOWN_EXTERNAL_SOURCES else None
         last_raw = (s.get("metadata") or {}).get("lastActivity")
         last_dt = None
         if last_raw:
@@ -711,7 +757,8 @@ def enrich_sessions(sessions: list[dict]) -> list[dict]:
         out.append({
             "id": sid,
             "short": sid[:8],
-            "project": m.get("project") or "(tundmatu)",
+            "project": m.get("project") or source or "(tundmatu)",
+            "external": source,
             "title": m.get("title") or "",
             "ctx": m.get("ctx") or 0,
             # ok / warn / high — kas restart tasub end ära

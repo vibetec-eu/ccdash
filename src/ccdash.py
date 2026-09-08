@@ -221,6 +221,8 @@ def collect() -> dict:
         "fetchedLabel": c.now().strftime("%H:%M:%S"),
         "offlinePricing": bool(used_offline),
         "peers": c.peers_status(),
+        # {allikas: tokenid}, mis on tokeninumbrites sees, aga dollarites MITTE
+        "externalUnpriced": c.external_unpriced(daily),
         "today": {"date": today, "cost": today_cost, "tokens": today_tokens},
         # Lävi on ümmargune EUR-summa; hoiame teda USD-s, sest kõik muud summad
         # tulevad ccusage'ist USD-s ja teisendus toimub alles kuvamisel.
@@ -931,6 +933,12 @@ async function load(){
     if (d.offlinePricing) warns.push(
       `<div class="card" style="margin-bottom:14px;border-color:var(--warning)">
          Hinnakiri tuli <strong>offline-vahemälust</strong> — võrgutõmme ebaõnnestus. Numbrid võivad olla veidi vanad.</div>`);
+    for (const [src, tok] of Object.entries(d.externalUnpriced || {})){
+      warns.push(
+        `<div class="card" style="margin-bottom:14px;border-color:var(--warning)">
+           <strong>${src}</strong>: ${(tok/1e6).toFixed(2)} M tokenit on tokeninumbrites sees, aga dollarites <strong>mitte</strong> —
+           see tööriist ei arvuta kulu. Tabelis projekt „${src}".</div>`);
+    }
     for (const p of (d.peers || [])){
       if (!p.stale) continue;
       const when = p.at ? `viimane koopia ${p.at.slice(11,16)} (${p.ageMin} min tagasi)` : 'koopiat ei ole veel';

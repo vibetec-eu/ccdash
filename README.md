@@ -89,6 +89,7 @@ Removal: `./uninstall.sh` — your log and config are kept.
 | `projectRoots` | Directories whose subdirectories are projects. **List every tree** where your projects live. **Order matters** — see below. |
 | `remoteHost` | Host name you reach this machine through (`ssh <host>`). Adds the `ssh -t <host> "tmux attach …"` variant to the session picker. Omit it and only the local command is offered. |
 | `peers` | Other machines that also run Claude Code, as ssh host aliases (`["mini"]`). Their `~/.claude/projects` is mirrored here and counted — see **Multiple machines** below. |
+| `externalSources` | Tools whose sessions ccusage discovers on its own but which never carry a cost (default `["openclaw"]`). Their tokens are shown, flagged as unpriced, and do not trip the pricing watchdog. A tag not on this list still counts as a lost price list. |
 | `timezone` | Day-boundary grouping. Defaults to the system zone. |
 | `thresholds.monthEur` | Monthly warning threshold shown on the dashboard (EUR). |
 | `thresholds.dayUsd` / `monthUsd` | Thresholds for the daily logger's macOS notification (USD). |
@@ -269,6 +270,7 @@ Eemaldus: `./uninstall.sh` — logi ja seadistus jäävad alles.
 | `projectRoots` | Kaustad, mille alamkaustad on projektid. **Loetle kõik puud**, kus projektid elavad. **Järjekord loeb** — vt allpool. |
 | `remoteHost` | Masinanimi, mille kaudu sa selle masinani jõuad (`ssh <host>`). Lisab sessioonivalijasse variandi `ssh -t <host> "tmux attach …"`. Puudumisel pakutakse ainult kohalikku käsku. |
 | `peers` | Teised masinad, kus Claude Code samuti jookseb, ssh-aliastena (`["mini"]`). Nende `~/.claude/projects` peegeldatakse siia ja loetakse kokku — vt **Mitu masinat** allpool. |
+| `externalSources` | Tööriistad, mille sessioonid ccusage ise üles leiab, aga millel kulu kunagi ei ole (vaikimisi `["openclaw"]`). Nende tokenid näidatakse, märgitakse hinnata ja hinnavalvet need ei käivita. Silt, mida loendis ei ole, loeb endiselt hinnakirja kaoks. |
 | `timezone` | Päevade grupeerimine. Puudumisel süsteemi oma. |
 | `thresholds.monthEur` | Kuu hoiatuslävi dashboardil (EUR). |
 | `thresholds.dayUsd` / `monthUsd` | Päevalogija macOS-teate läved (USD). |
