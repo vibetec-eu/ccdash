@@ -981,7 +981,8 @@ sessLocal.onchange = () => {
 
 async function fetchTmux(){
   try {
-    const d = await (await fetch('/api/tmux')).json();
+    // Üle ssh (tmuxHost) võib loend venida; 8 s pärast pigem tühi kui igavene ootus.
+    const d = await (await fetch('/api/tmux', {signal: AbortSignal.timeout(8000)})).json();
     tmuxData = d;
     sessWrap.hidden = !d.enabled;
     const wrap = document.getElementById('sessLocalWrap');
@@ -1009,7 +1010,8 @@ function renderSessMenu(){
 
   const out = [];
   if (sessions.length){
-    out.push('<h3>Jooksevad</h3>');
+    // Kust need sessioonid pärit on: `tmuxHost` = tmux jookseb teises masinas.
+    out.push(`<h3>Jooksevad${d.tmuxHost ? ' · ' + esc(d.tmuxHost) : ''}</h3>`);
     out.push(sessions.map(s => `
       <button class="mi" data-act="attach" data-name="${esc(s.name)}">
         ${s.attached ? '<span class="livedot"></span>' : ''}${esc(s.name)}
@@ -1063,10 +1065,13 @@ async function sessAction(el){
   try {
     const body = act === 'chat' ? {kind:'chat'}
                                 : {kind:'project', project: el.dataset.project};
+    // Halvimal juhul teeb server 4 ssh-kutset × 10 s — brauser ei tohi selle taga
+    // lõputult „Käivitan…" näidata.
     const r = await fetch('/api/tmux/new', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15000),
     });
     const d = await r.json();
     if (!d.ok){ showSessMsg(esc(d.error || 'ei õnnestunud'), true); return; }
@@ -1075,7 +1080,11 @@ async function sessAction(el){
     if (!d.created)
       showSessMsg(sessMsg.innerHTML + '<br>Sessioon <strong>oli juba olemas</strong> — '
                   + 'midagi uut ei käivitatud.', false);
-  } catch(e){ showSessMsg('server ei vasta', true); }
+  } catch(e){
+    const host = tmuxData && tmuxData.tmuxHost;
+    showSessMsg(e && e.name === 'TimeoutError' && host
+      ? `${esc(host)} ei vasta piisavalt kiiresti — proovi uuesti` : 'server ei vasta', true);
+  }
 }
 
 document.getElementById('sessMenuBody').onclick = e => {

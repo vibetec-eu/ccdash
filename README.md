@@ -88,6 +88,7 @@ Removal: `./uninstall.sh` — your log and config are kept.
 |---|---|
 | `projectRoots` | Directories whose subdirectories are projects. **List every tree** where your projects live. **Order matters** — see below. |
 | `remoteHost` | Host name you reach this machine through (`ssh <host>`). Adds the `ssh -t <host> "tmux attach …"` variant to the session picker. Omit it and only the local command is offered. |
+| `tmuxHost` | Host where tmux and Claude actually run, when that is **not** the machine serving the dashboard (a laptop whose workstation is another Mac). Every tmux call then goes over `ssh -o BatchMode=yes <tmuxHost>`; needs passwordless ssh. Usually the same value as `remoteHost`. Omit it and tmux runs locally. |
 | `peers` | Other machines that also run Claude Code, as ssh host aliases (`["mini"]`). Their `~/.claude/projects` is mirrored here and counted — see **Multiple machines** below. |
 | `externalSources` | Tools whose sessions ccusage discovers on its own but which never carry a cost (default `["openclaw"]`). Their tokens are shown, flagged as unpriced, and do not trip the pricing watchdog. A tag not on this list still counts as a lost price list. |
 | `timezone` | Day-boundary grouping. Defaults to the system zone. |
@@ -173,6 +174,12 @@ sent into a live Claude prompt.
 The toggle at the top of the menu decides whether the copied line is prefixed with
 `ssh -t <remoteHost>`. Turn it on when your terminal is already on this machine (an
 editor's remote-SSH terminal), off when it is somewhere else. The choice is remembered.
+
+With `tmuxHost` set, the picker lists and starts sessions **on that machine** — the menu
+heading says so (`Running · mini`). Each click makes a few ssh round-trips, so put
+`ControlMaster auto` / `ControlPersist 10m` for that host into `~/.ssh/config`; one
+handshake instead of four. Errors name the cause (`ssh mini timed out`, `no such directory
+on mini`) rather than a generic failure.
 
 > **This is the one endpoint that starts a process,** so it is worth knowing how it is
 > fenced. The browser never sends a path — it sends a project *name*, and the path is
@@ -269,6 +276,7 @@ Eemaldus: `./uninstall.sh` — logi ja seadistus jäävad alles.
 |---|---|
 | `projectRoots` | Kaustad, mille alamkaustad on projektid. **Loetle kõik puud**, kus projektid elavad. **Järjekord loeb** — vt allpool. |
 | `remoteHost` | Masinanimi, mille kaudu sa selle masinani jõuad (`ssh <host>`). Lisab sessioonivalijasse variandi `ssh -t <host> "tmux attach …"`. Puudumisel pakutakse ainult kohalikku käsku. |
+| `tmuxHost` | Masin, kus tmux ja Claude päriselt jooksevad, kui see **ei ole** dashboardi serveeriv masin (sülearvuti, mille tööjaam on teine Mac). Iga tmux-kutse läheb siis üle `ssh -o BatchMode=yes <tmuxHost>`; vajab paroolita ssh-d. Tavaliselt sama väärtus mis `remoteHost`. Puudumisel jookseb tmux kohapeal. |
 | `peers` | Teised masinad, kus Claude Code samuti jookseb, ssh-aliastena (`["mini"]`). Nende `~/.claude/projects` peegeldatakse siia ja loetakse kokku — vt **Mitu masinat** allpool. |
 | `externalSources` | Tööriistad, mille sessioonid ccusage ise üles leiab, aga millel kulu kunagi ei ole (vaikimisi `["openclaw"]`). Nende tokenid näidatakse, märgitakse hinnata ja hinnavalvet need ei käivita. Silt, mida loendis ei ole, loeb endiselt hinnakirja kaoks. |
 | `timezone` | Päevade grupeerimine. Puudumisel süsteemi oma. |
@@ -354,6 +362,12 @@ Claude'i sisendisse.
 Menüü ülaosa lüliti otsustab, kas kopeeritava rea ees on `ssh -t <remoteHost>`. Pane sisse,
 kui su terminal on juba selles masinas (redaktori remote-SSH terminal), välja siis, kui ta
 on mujal. Valik jääb meelde.
+
+Kui `tmuxHost` on seadistatud, näitab ja käivitab valija sessioone **selles masinas** —
+menüü pealkiri ütleb seda (`Jooksevad · mini`). Iga klikk teeb paar ssh-ringi, seega pane
+selle hosti jaoks `~/.ssh/config`-i `ControlMaster auto` / `ControlPersist 10m`: üks
+käepigistus nelja asemel. Veateated nimetavad põhjuse (`ssh mini aegus`, `kausta ei ole
+masinas mini`), mitte üldsõnalist tõrget.
 
 > **See on ainus endpoint, mis käivitab protsessi,** seega tasub teada, kuidas ta on
 > piiratud. Brauser ei saada kunagi teed — ta saadab projekti *nime* ja tee otsitakse
