@@ -171,6 +171,14 @@ here (`tmux new-session` in the project directory, running `claude` through a lo
 and hands you the attach command. An already-running session is never touched: no keys are
 sent into a live Claude prompt.
 
+Each row shows the project's state: a live dot (activity in the last 10 minutes), `bg` /
+`⏳` when a background job on that project is running or waiting, the last activity as a
+relative time, and the cost **as ccusage counts it** — every session still on disk, not this
+month. Recently active projects (7 days) are listed first, the rest alphabetically. A
+background job is matched to a project by the **first word of its prompt** (`HA/masterplan …`,
+`ccdash continue …`); a free-form prompt gets no project badge. Clicking a row turns it green
+with `✓ copied` right where you clicked, and the command stays in the sticky header.
+
 The toggle at the top of the menu decides whether the copied line is prefixed with
 `ssh -t <remoteHost>`. Turn it on when your terminal is already on this machine (an
 editor's remote-SSH terminal), off when it is somewhere else. The choice is remembered.
@@ -358,6 +366,14 @@ klikk kopeerib nende `tmux attach` rea —, siis kõik projektid `projectRoots` 
 sessiooni siin (`tmux new-session` projektikaustas, `claude` login-shelli kaudu) ja annab
 attach-käsu. Juba jooksvat sessiooni ei puututa kunagi: ühtegi klahvi ei saadeta elava
 Claude'i sisendisse.
+
+Iga rida näitab projekti seisu: live-täpp (tegevus viimase 10 minuti jooksul), `bg` / `⏳`,
+kui selle projekti taustatöö jookseb või ootab, viimane tegevus suhtelise ajana ja kulu
+**nii, nagu ccusage loeb** — kõik kettal olevad sessioonid, mitte jooksev kuu. Viimase 7 päeva
+jooksul liikunud projektid on ees, ülejäänud tähestikus. Taustatöö seotakse projektiga
+**prompti esimese sõna** järgi (`HA/masterplaan …`, `ccdash jätka …`); vabas vormis prompt
+märki ei saa. Klikk teeb rea roheliseks tekstiga `✓ kopeeritud` sealsamas, kus klikkisid, ja
+käsurida jääb kleepuvasse päisesse.
 
 Menüü ülaosa lüliti otsustab, kas kopeeritava rea ees on `ssh -t <remoteHost>`. Pane sisse,
 kui su terminal on juba selles masinas (redaktori remote-SSH terminal), välja siis, kui ta

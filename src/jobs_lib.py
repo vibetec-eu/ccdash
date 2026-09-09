@@ -15,6 +15,7 @@ Hübriidpollimine:
 ⛔ Väljastatakse ainult FIELDS-nimekirja väljad. `state.json` sisaldab lisaks
 `sessionId`, `bridgeSessionId`, `bridgeOwnerAccountUuid`,
 `bridgeOwnerOrganizationUuid` ja `cwd` — need ei tohi payload'i jõuda.
+Projekti NIMI (`project`) on lubatud, tee mitte.
 """
 from __future__ import annotations
 
@@ -32,7 +33,7 @@ CLI_TIMEOUT_SEC = 15
 
 # Ainus koht, kus otsustatakse, mis kliendini jõuab.
 FIELDS = ("id", "state", "name", "tokens", "needs", "detail", "intent",
-          "startedAt", "updatedAt", "hasTerminal", "waiting", "webUrl")
+          "startedAt", "updatedAt", "hasTerminal", "waiting", "webUrl", "project")
 
 _state_cache: dict[str, str] = {}
 _state_fetched: float = 0.0
@@ -79,9 +80,36 @@ def _web_url(bridge_id: str | None) -> str | None:
     return f"https://claude.ai/code/session_{str(bridge_id)[4:]}"
 
 
+def _job_project(st: dict, projects: dict[str, str]) -> str | None:
+    """Taustatöö projekt — NIMI, mitte tee.
+
+    Mõõdetud 09.09.2026 (53 state.json): `cwd` on 96% töödest projektijuur ise
+    (`~/Claude/Projects`), seega teest projekti ei saa. Parem signaal on prompti
+    ESIMENE sõna — Heikki konventsioon „lõngakood prompti algusesse":
+    `ccdash jätka…`, `HA/masterplaan jätka…`. Sobitub ~pooltel; vabas vormis
+    prompt (`miks side maas on`) või alias (`SL`) jääb None. `cwd` on varuvariant
+    ainult siis, kui ta on projekti ALAMkaust.
+    """
+    text = (st.get("intent") or st.get("name") or "").strip()
+    first = re.split(r"[\s/,.:]+", text, maxsplit=1)[0].lower() if text else ""
+    if first and first in projects:
+        return projects[first]
+    try:
+        import ccusage_lib as c
+        return c._project_from_cwd(str(st.get("cwd") or ""))
+    except Exception:
+        return None
+
+
 def _read_jobs() -> list[dict]:
     cli = _cli_states()
     items = []
+    # Sama nimekiri, mida sessioonivalija näitab — üks tõde. tmux_lib ei tõsta erindit.
+    try:
+        import tmux_lib
+        projects = {p["display"].lower(): p["display"] for p in tmux_lib.list_projects()}
+    except Exception:
+        projects = {}
     for path in glob.glob(os.path.join(JOBS_DIR, "*", "state.json")):
         jid = os.path.basename(os.path.dirname(path))
         try:
@@ -114,6 +142,7 @@ def _read_jobs() -> list[dict]:
             # sessiooni vastu). Väljastame ainult tuletatud URL-i, mitte
             # toorest bridge-ID-d ega `bridgeOwner*` välju.
             "webUrl": _web_url(st.get("bridgeSessionId")),
+            "project": _job_project(st, projects),
         })
     # Ootajad ette, siis vanim seisak enne — just neid on vaja märgata.
     items.sort(key=lambda x: (not x["waiting"], x.get("updatedAt") or ""))
@@ -153,4 +182,5 @@ def demo_anonymize_jobs(jobs: dict) -> dict:
             if it.get(k):
                 it[k] = "(demo)"
         it["webUrl"] = None
+        it["project"] = None
     return jobs

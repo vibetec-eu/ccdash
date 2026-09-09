@@ -498,10 +498,24 @@ footer{margin-top:22px;font-size:11.5px;color:var(--muted);line-height:1.65}
 }
 .mi:hover{background:rgba(127,127,127,.14)}
 .mi .path{
-  margin-left:auto;font-size:11px;color:var(--muted);
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:150px;
+  margin-left:auto;font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:175px;
 }
 .mi .livedot{flex:none}
+.mi .tag{
+  font-size:10px;padding:0 4px;border-radius:4px;background:rgba(127,127,127,.18);
+  color:var(--text-secondary);margin-right:4px;
+}
+.mi .tag.wait{background:var(--warning);color:#1a1a1a;font-weight:600}
+/* Klikitud rida: silm on real, mitte päises — tagasiside peab olema SEAL. */
+.mi.done{background:rgba(52,199,89,.22);transition:background .25s}
+.mi.done .path{color:var(--good);font-weight:600}
+.mi.busy .path{color:var(--text-secondary)}
+.menuhead{
+  position:sticky;top:-8px;z-index:2;margin:-8px -8px 0;padding:8px 8px 4px;
+  background:var(--surface-1);border-bottom:1px solid var(--border);
+}
+.menu hr.thin{margin:6px 0 2px}
 .menu hr{border:0;border-top:1px solid var(--border);margin:8px 0 0}
 .menumsg{padding:7px 8px;font-size:12px;color:var(--text-secondary);line-height:1.45}
 .menumsg code{
@@ -522,13 +536,17 @@ footer{margin-top:22px;font-size:11.5px;color:var(--muted);line-height:1.65}
       <button id="sessBtn" aria-haspopup="menu" aria-expanded="false"
               title="Ava või alusta Claude-sessioon">Sessioonid ▾</button>
       <div class="menu" id="sessMenu" hidden role="menu">
-        <label class="menuopt" id="sessLocalWrap" hidden>
-          <input type="checkbox" id="sessLocal"><span id="sessLocalLabel"></span>
-        </label>
-        <input class="menufilter" id="sessFilter" type="search" placeholder="otsi…"
-               autocomplete="off" aria-label="Otsi projekti">
+        <!-- Kleepuv päis: tagasiside peab olema nähtav ka siis, kui loend on
+             keritud projekti nr 50 juurde. Enne oli teade loendi PÕHJAS. -->
+        <div class="menuhead">
+          <label class="menuopt" id="sessLocalWrap" hidden>
+            <input type="checkbox" id="sessLocal"><span id="sessLocalLabel"></span>
+          </label>
+          <input class="menufilter" id="sessFilter" type="search" placeholder="otsi…"
+                 autocomplete="off" aria-label="Otsi projekti">
+          <div class="menumsg" id="sessMsg" hidden></div>
+        </div>
         <div id="sessMenuBody"></div>
-        <div class="menumsg" id="sessMsg" hidden></div>
       </div>
     </div>
     <button id="themeBtn" title="Vaheta teema">Teema</button>
@@ -955,6 +973,7 @@ async function load(){
       `1 € = ${fxRate} $ (${d.fx ? d.fx.source : '?'}${d.fx ? ', ' + d.fx.date : ''})`;
     renderJobs(d); renderLimits(d); renderTiles(d); renderWorking(d);
     renderChartStats(d); renderChart(d); renderProjects(d); renderSessions(d);
+    if (!sessMenu.hidden) renderSessMenu();   // avatud valija seis ei tohi vananeda
   }catch(e){
     document.getElementById('status').innerHTML = '<span class="dot err"></span>server ei vasta';
   }
@@ -997,34 +1016,96 @@ async function fetchTmux(){
 
 function shortPath(p){ return String(p).split('/').slice(-2).join('/'); }
 
+// Suhteline aeg kitsasse ritta: „5 min", „2 h", „3 p". Absoluutne „dd.mm HH:MM" ei mahu.
+function ago(ts){
+  if (!ts) return '';
+  const s = Math.max(0, Date.now()/1000 - ts);
+  if (s < 60) return 'nüüd';
+  if (s < 3600) return `${Math.round(s/60)} min`;
+  if (s < 86400) return `${Math.round(s/3600)} h`;
+  return `${Math.round(s/86400)} p`;
+}
+
+const RECENT_SEC = 7 * 86400;   // „aktiivne" projekt tõuseb loendi algusesse
+
+// Projekti seis /api/data payload'ist (lastData). Valija EI TOHI kuludest sõltuda:
+// kui lastData puudub või on vigane, tuleb tühi Map ja read renderduvad ilma seisuta.
+function projectStats(){
+  const m = new Map();
+  const d = lastData;
+  if (!d || !d.ok) return m;
+  const get = k => { if (!m.has(k)) m.set(k, {last:0, cost:0, live:false, bg:0, waiting:false}); return m.get(k); };
+  for (const s of (d.sessions || [])){
+    const p = get(s.project);
+    p.last = Math.max(p.last, s.lastSort || 0);
+    p.live = p.live || !!s.live;
+  }
+  for (const p of (d.projects || [])) get(p.project).cost = p.cost || 0;
+  for (const j of ((d.jobs && d.jobs.items) || [])){
+    if (!j.project) continue;                 // vabas vormis prompt — projekti ei tea
+    const p = get(j.project);
+    p.bg += 1; p.waiting = p.waiting || !!j.waiting;
+  }
+  return m;
+}
+
+// Rea parem pool: [bg] [⏳] 2 h · 614 €. Ilma andmeteta „—".
+function statHtml(st){
+  if (!st) return '<span class="path">—</span>';
+  const tags = (st.bg ? '<span class="tag">bg</span>' : '')
+             + (st.waiting ? '<span class="tag wait">⏳</span>' : '');
+  const bits = [];
+  if (st.last) bits.push(ago(st.last));
+  if (st.cost) bits.push(eur(st.cost));
+  return `<span class="path">${tags}${esc(bits.join(' · ') || '—')}</span>`;
+}
+
 function renderSessMenu(){
   const d = tmuxData;
   if (!d) return;
   const q = sessFilter.value.trim().toLowerCase();
   const hit = s => !q || String(s).toLowerCase().includes(q);
+  const stats = projectStats();
+  const now = Date.now()/1000;
+  // tmux-nimi -> kuvatav projektinimi (sama nimekiri, mida server näitab)
+  const byName = new Map((d.projects || []).map(p => [p.name, p.display]));
   const sessions = (d.sessions || []).filter(s => hit(s.name));
   // Jooksva sessiooni projekt on juba ülemises plokis — teine rida all oleks
   // sama asi kaks korda ja klikk sellel ei teeks midagi uut.
   const busy = new Set((d.sessions || []).map(s => s.name));
   const projects = (d.projects || []).filter(p => hit(p.display) && !busy.has(p.name));
+  const st = p => stats.get(p.display);
+  // Viimase 7 päeva jooksul liikunud projektid ette, värskuse järgi; ülejäänud tähestikus.
+  const recent = projects.filter(p => st(p) && now - st(p).last < RECENT_SEC)
+                         .sort((a, b) => st(b).last - st(a).last);
+  const rest = projects.filter(p => !recent.includes(p));
+
+  const row = p => `
+      <button class="mi" data-act="start" data-project="${esc(p.display)}"
+              title="${p.name !== p.display ? 'tmux: ' + esc(p.name) : esc(p.display)}">
+        ${st(p) && st(p).live ? '<span class="livedot"></span>' : ''}${esc(p.display)}
+        ${statHtml(st(p))}
+      </button>`;
 
   const out = [];
   if (sessions.length){
     // Kust need sessioonid pärit on: `tmuxHost` = tmux jookseb teises masinas.
     out.push(`<h3>Jooksevad${d.tmuxHost ? ' · ' + esc(d.tmuxHost) : ''}</h3>`);
-    out.push(sessions.map(s => `
-      <button class="mi" data-act="attach" data-name="${esc(s.name)}">
-        ${s.attached ? '<span class="livedot"></span>' : ''}${esc(s.name)}
-        <span class="path">${esc(shortPath(s.path))}</span>
-      </button>`).join(''));
+    out.push(sessions.map(s => {
+      const ps = stats.get(byName.get(s.name));
+      return `
+      <button class="mi" data-act="attach" data-name="${esc(s.name)}" title="${esc(shortPath(s.path))}">
+        ${(s.attached || (ps && ps.live)) ? '<span class="livedot"></span>' : ''}${esc(s.name)}
+        ${statHtml(ps)}
+      </button>`; }).join(''));
   }
-  if (projects.length){
+  if (recent.length){
     out.push('<h3>Projektid</h3>');
-    out.push(projects.map(p => `
-      <button class="mi" data-act="start" data-project="${esc(p.display)}">
-        ${esc(p.display)}
-        ${p.name !== p.display ? `<span class="path">→ ${esc(p.name)}</span>` : ''}
-      </button>`).join(''));
+    out.push(recent.map(row).join(''));
+  }
+  if (rest.length){
+    out.push(recent.length ? '<hr class="thin">' : '<h3>Projektid</h3>');
+    out.push(rest.map(row).join(''));
   }
   if (!sessions.length && !projects.length)
     out.push('<div class="menuempty">Midagi ei vasta otsingule.</div>');
@@ -1033,6 +1114,21 @@ function renderSessMenu(){
     out.push('<button class="mi" data-act="chat">+ uus chat <span class="path">vaba teema</span></button>');
   }
   document.getElementById('sessMenuBody').innerHTML = out.join('');
+}
+
+// Rea-sisene tagasiside: silm on real, mitte päises. Rida leitakse nime järgi,
+// sest käivituse järel renderdatakse loend üle ja projekt kolib „Jooksevad" alla
+// TEISE atribuudiga (data-project="HA" -> data-name="ha").
+function markRow(sel, text, cls){
+  const el = document.querySelector(`#sessMenuBody ${sel}`);
+  if (!el) return;
+  el.classList.add(cls);
+  const path = el.querySelector('.path');
+  if (path){ path.dataset.orig = path.innerHTML; path.textContent = text; }
+  if (cls === 'done') setTimeout(() => {
+    el.classList.remove('done');
+    if (path && path.dataset.orig !== undefined) path.innerHTML = path.dataset.orig;
+  }, 4000);
 }
 
 function showSessMsg(html, isErr){
@@ -1060,8 +1156,14 @@ async function copyLine(name){
 
 async function sessAction(el){
   const act = el.dataset.act;
-  if (act === 'attach'){ await copyLine(el.dataset.name); return; }
+  if (act === 'attach'){
+    await copyLine(el.dataset.name);
+    markRow(`[data-name="${CSS.escape(el.dataset.name)}"]`, '✓ kopeeritud', 'done');
+    return;
+  }
   showSessMsg('Käivitan…', false);
+  if (act === 'start')
+    markRow(`[data-project="${CSS.escape(el.dataset.project)}"]`, '…käivitan', 'busy');
   try {
     const body = act === 'chat' ? {kind:'chat'}
                                 : {kind:'project', project: el.dataset.project};
@@ -1077,6 +1179,8 @@ async function sessAction(el){
     if (!d.ok){ showSessMsg(esc(d.error || 'ei õnnestunud'), true); return; }
     await fetchTmux(); renderSessMenu();
     await copyLine(d.session);
+    // Uus rida leitakse SERVERI antud sessiooninime järgi (vt markRow).
+    markRow(`[data-name="${CSS.escape(d.session)}"]`, d.created ? '✓ käivitatud, kopeeritud' : '✓ kopeeritud', 'done');
     if (!d.created)
       showSessMsg(sessMsg.innerHTML + '<br>Sessioon <strong>oli juba olemas</strong> — '
                   + 'midagi uut ei käivitatud.', false);
