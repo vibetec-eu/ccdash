@@ -200,9 +200,13 @@ on mini`) rather than a generic failure.
 
 ### What it does not do
 
-- **No percentage of your limit.** Anthropic does not publish the limit anywhere
-  machine-readable (checked: transcripts, logs, caches, `~/.claude.json`). ccdash shows
-  actual volumes and reset times instead. For the percentage: claude.ai → Settings → Usage.
+- **Token and cost columns are local counts, not your limit.** They come from ccusage
+  reading this machine's (and peers') transcripts; claude.ai web chats and cloud sessions
+  are not in them. The *percentage of your limit* is a separate thing: ccdash reads it
+  from the same OAuth endpoint Claude Code's `/usage` uses (`api.anthropic.com/api/oauth/usage`,
+  token from the macOS Keychain entry `Claude Code-credentials`). If that call fails — most
+  often an expired token, fix with `claude` → `/login` — the last column falls back to
+  *elapsed time* of the window, marked „aega", and the reason is shown above the table.
 - **Not cross-platform.** launchd, `osascript` notifications and the Chrome app window are
   macOS-specific. The server itself (`python3 src/ccdash.py --port 8787`) runs anywhere.
 - **Sends nothing anywhere.** Everything stays on your machine; the network is touched only
@@ -396,9 +400,14 @@ masinas mini`), mitte üldsõnalist tõrget.
 
 ### Mida see EI tee
 
-- **Ei näita protsenti limiidist.** Anthropic ei avalda limiiti üheski masinloetavas kohas
-  (kontrollitud: transkriptid, logid, vahemälu, `~/.claude.json`). ccdash näitab tegelikke
-  mahtusid ja lähtestamisaegu. Protsent: claude.ai → Settings → Usage.
+- **Tokenite ja väärtuse veerud on kohalik loendus, mitte limiit.** Need tulevad
+  ccusage'ist selle masina (ja peer'ide) transkriptidest; claude.ai veebivestlusi ega
+  pilvesessioone seal ei ole. *Protsent limiidist* on eraldi asi: ccdash loeb selle
+  samast OAuth-otspunktist, mida Claude Code'i `/usage` kasutab
+  (`api.anthropic.com/api/oauth/usage`, token macOS-i Keychaini kirjest
+  `Claude Code-credentials`). Kui see päring ebaõnnestub — enamasti aegunud token,
+  ravi `claude` → `/login` — näitab viimane veerg akna *möödunud aega* märkega „aega"
+  ja põhjus on tabeli kohal kirjas.
 - **Ei ole mitmeplatvormiline.** launchd, `osascript`-teated ja Chrome'i äpiaken on macOS-i
   omad. Server ise (`python3 src/ccdash.py --port 8787`) töötab igal pool.
 - **Ei saada andmeid kuhugi.** Kõik jääb masinasse; võrku läheb ccdash ainult EKP kursi,
