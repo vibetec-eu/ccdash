@@ -22,6 +22,8 @@ import time
 import re
 import subprocess
 import urllib.parse
+import urllib.error
+import urllib.request
 import webbrowser
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -40,6 +42,8 @@ ACTIVE_WINDOW_SEC = 10 * 60      # roheline täpp: tegevus <10 min tagasi
 WORK_WINDOW_SEC = 4 * 3600       # "töös": käimasolev tööseanss, mille juurde naased
 PEER_SYNC_SEC = 300          # teise masina `~/.claude/projects` koopia värskendus
 IDLE_AFTER_SEC = 90          # kui keegi pole nii kaua pollinud, lõpeta värskendamine
+LIMITS_SEC = 60              # Anthropicu limiidi-otspunkti küsimise vahe
+USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 # Kuu hoiatuslävi eurodes (kuvamiseks ümmargune). Seadistus: ccdash.config.json
 # -> thresholds.monthEur.
 MONTH_THRESHOLD_EUR = c.threshold("monthEur", 1300.0)
@@ -63,10 +67,12 @@ _wake = threading.Event()
 def weekly_limits(blocks: list[dict], active: dict | None) -> dict:
     """Kolm rida nagu claude.ai → Settings → Usage: sessioon + kaks nädalaakent.
 
-    ⚠️ Protsenti limiidist EI SAA arvutada — Anthropic ei avalda limiiti üheski
-    masinloetavas kohas (kontrollitud: transkriptid, logid, vahemälu, ~/.claude.json).
-    Seega näitame **tegelikke mahtusid ja lähtestamisaegu**, mitte täituvust.
-    Protsendi enda jaoks: claude.ai → Settings → Usage.
+    ⚠️ Siit tuleb ainult MAHT (tokenid, väärtus) ja ccusage'i hinnanguline aken.
+    Protsent limiidist EI OLE nendest arvutatav — ccusage ei tea limiiti ega näe
+    claude.ai veebi/pilvesessioone. Päris % tuleb `anthropic_limits()`-ist.
+    (Kuni 16.09.2026 seisis siin väide, et Anthropic ei avalda limiiti masinloetavalt —
+    see oli vale: `/usage` loeb `api/oauth/usage` otspunkti. Heikki oli 16.09 15:20
+    limiidis, kui see tabel näitas „52 %" möödunud aega — sellest see parandus.)
 
     Nädalaaken lähtub claude.ai kuvatud ajast "Resets Mon 7:00 PM" = E 19:00.
     """
@@ -124,6 +130,109 @@ def weekly_limits(blocks: list[dict], active: dict | None) -> dict:
     }
 
 
+_limits_cache: dict = {"at": 0.0, "data": None}
+
+
+def _oauth_token() -> str | None:
+    """Claude Code'i OAuth-token — sama, mida `/usage` kasutab.
+
+    macOS-il Keychainis (`Claude Code-credentials`), mujal `~/.claude/.credentials.json`.
+    NB: Keychain vastab ainult sisse logitud GUI-sessioonis; SSH alt (nt Mini) ei anna
+    midagi — seepärast küsib limiiti see masin, kus server jookseb, mitte peer.
+    """
+    raw = ""
+    try:
+        raw = subprocess.run(
+            ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+            capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        raw = ""
+    if not raw.strip():
+        try:
+            raw = (Path.home() / ".claude" / ".credentials.json").read_text(encoding="utf-8")
+        except OSError:
+            return None
+    try:
+        return json.loads(raw).get("claudeAiOauth", {}).get("accessToken") or None
+    except (ValueError, AttributeError):
+        return None
+
+
+def _limit_window(x: dict | None) -> dict | None:
+    """{utilization, resets_at} → {pct, resetsAt (Eesti aeg, minutini ümardatud), resetsInMin}."""
+    if not isinstance(x, dict):
+        return None
+    pct = x.get("utilization", x.get("percent"))
+    rs = x.get("resets_at")
+    out: dict = {"pct": float(pct) if pct is not None else None,
+                 "resetsAt": None, "resetsInMin": None}
+    if rs:
+        try:
+            # Anthropic annab 18:59:59.5 — ümarda minutini, muidu näitab „E 18:59".
+            t = datetime.fromisoformat(str(rs).replace("Z", "+00:00")) + timedelta(seconds=30)
+            t = t.replace(second=0, microsecond=0).astimezone(c.TZ)
+            out["resetsAt"] = t.isoformat()
+            out["resetsInMin"] = max(0, int((t - c.now()).total_seconds() // 60))
+        except ValueError:
+            pass
+    return out
+
+
+def _fetch_anthropic_limits() -> dict:
+    tok = _oauth_token()
+    if not tok:
+        return {"ok": False, "error": "OAuth-token puudub (Keychain / .credentials.json)"}
+    req = urllib.request.Request(USAGE_URL, headers={
+        "Authorization": f"Bearer {tok}",
+        "anthropic-beta": "oauth-2025-04-20",
+        "Content-Type": "application/json",
+        "User-Agent": "ccdash",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            d = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        hint = " — token aegunud, tee `claude` → /login" if e.code in (401, 403) else ""
+        return {"ok": False, "error": f"HTTP {e.code}{hint}"}
+    except (OSError, ValueError) as e:
+        return {"ok": False, "error": str(e)[:120]}
+
+    # Mudelipõhised nädalaread tulevad `limits` loendist (kind=weekly_scoped),
+    # nimi on scope.model.display_name (nt "Fable"). Uus mudel ilmub ise.
+    models = []
+    for l in d.get("limits") or []:
+        if not isinstance(l, dict) or l.get("kind") != "weekly_scoped":
+            continue
+        name = (((l.get("scope") or {}).get("model") or {}).get("display_name")) or "mudel"
+        w = _limit_window(l)
+        if w:
+            w["name"] = str(name)
+            models.append(w)
+    return {
+        "ok": True,
+        "fetchedLabel": c.now().strftime("%H:%M:%S"),
+        "session": _limit_window(d.get("five_hour")),
+        "weekAll": _limit_window(d.get("seven_day")),
+        "models": models,
+    }
+
+
+def anthropic_limits() -> dict:
+    """Päris % limiidist Anthropicult — sama otspunkt, mida Claude Code'i `/usage` ja
+    claude.ai → Settings → Usage näitavad. Katab KÕIK konto kasutuse (veeb, pilv,
+    teised masinad), mida kohalik ccusage ei näe.
+
+    Vahemälu LIMITS_SEC; viga ei tõsta kunagi erindit (tagastab ok=False), sest
+    collect() erind peidaks brauseris kogu dashboardi veabänneri taha.
+    """
+    now = time.time()
+    if _limits_cache["data"] is not None and now - _limits_cache["at"] < LIMITS_SEC:
+        return _limits_cache["data"]
+    out = _fetch_anthropic_limits()
+    _limits_cache.update(at=now, data=out)
+    return out
+
+
 def demo_anonymize(sessions: list[dict]) -> list[dict]:
     """Projektinimed -> demo1…demoN (kulu järgi), pealkirjad -> üldised.
 
@@ -169,6 +278,7 @@ def collect() -> dict:
     active = next((b for b in blocks if b.get("isActive")), None)
     now_ts = c.now().timestamp()
     limits = weekly_limits(blocks, active)
+    limits["real"] = anthropic_limits()
 
     # Viimased 14 KALENDRIPÄEVA, vanemast uuemani. Kasutuseta päevad tuleb nullina
     # sisse kirjutada — ccusage jätab need välja ja ajatelg läheks katki (08.08 auk).
@@ -565,15 +675,16 @@ footer{margin-top:22px;font-size:11.5px;color:var(--muted);line-height:1.65}
 
   <section class="card" style="margin-bottom:14px">
     <h2>Limiitide aknad</h2>
-    <p class="hint">Tegelik maht ja lähtestumisaeg. <strong>Protsenti limiidist siin ei ole</strong> —
-      Anthropic ei avalda limiiti masinloetavalt; % vaata claude.ai → Settings → Usage.
-      Viimane veerg on <strong>möödunud aeg</strong> aknast, mitte ärakasutatud osa.
-      Sessioonirea „Lähtestub" on <em>ccusage'i bloki</em> lõpp (esimese kõne tund + 5 h),
-      mitte Anthropicu päris limiidiaken; nädalaread järgivad claude.ai aega (E 19:00).</p>
+    <p class="hint"><strong>% limiidist</strong> ja lähtestusaeg tulevad Anthropicu otspunktist
+      <code>api/oauth/usage</code> — sama allikas, mida <code>/usage</code> ja claude.ai → Settings → Usage
+      näitavad, ja see katab kogu konto (veeb, pilv, teised masinad). Tokenid ja väärtus on
+      ccusage'i kohalik loendus (see masin + peer-koopiad) — need ei ole limiidiga võrreldavad.
+      Kui otspunkt ei vasta, on viimane veerg <strong>möödunud aeg</strong> aknast ja märgitud „aega".
+      <span id="limitNote"></span></p>
     <table>
       <thead><tr>
         <th>Aken</th><th>Lähtestub</th>
-        <th class="num">Tokenid</th><th class="num">Väärtus</th><th>Aeg akent läbi</th>
+        <th class="num">Tokenid</th><th class="num">Väärtus</th><th>Limiidist kasutatud</th>
       </tr></thead>
       <tbody id="limitBody"></tbody>
     </table>
@@ -680,13 +791,15 @@ function renderTiles(d){
     const leftMin = Math.max(0, Math.round((end - now) / 60000));
     const hh = Math.floor(leftMin/60), mm = leftMin % 60;
     const rate = a.burnRate ? a.burnRate.costPerHour : 0;
+    const rs = d.limits.real && d.limits.real.ok ? d.limits.real.session : null;
     const proj = a.projection ? a.projection.totalCost : 0;
     // Staatusvärv projektsiooni järgi: aken, mis lõpeks üle $300, on erakordne.
     const cls = proj > 300 ? 'critical' : proj > 150 ? 'warning' : '';
     t.push(tile('Aktiivne 5 h aken', usd(a.costUSD),
       `${start.toLocaleTimeString('et-EE',{hour:'2-digit',minute:'2-digit'})}–` +
       `${end.toLocaleTimeString('et-EE',{hour:'2-digit',minute:'2-digit'})} · ` +
-      `jäänud ${hh}h ${mm}min · ${num(a.entries)} API-päringut`,
+      `jäänud ${hh}h ${mm}min · ${num(a.entries)} API-päringut` +
+      (rs && rs.pct != null ? ` · <strong>limiidist ${rs.pct.toFixed(0)}%</strong>` : ''),
       `<div class="meter"><i style="width:${pct.toFixed(1)}%"></i></div>`));
     t.push(tile('Põlemiskiirus', usd(rate) + '/h',
       `Selles tempos akna lõpuks <strong>${usd(proj)}</strong>` +
@@ -746,33 +859,47 @@ function dur(min){
 
 function renderLimits(d){
   const L = d.limits, s = L.session, w = L.week;
+  const R = L.real && L.real.ok ? L.real : null;
   const clock = iso => new Date(iso).toLocaleString('et-EE',
     {weekday:'short', hour:'2-digit', minute:'2-digit'});
-  // Riba = kui suur osa AJAAKNAST on läbi. See EI ole limiidi täituvus.
-  const sessPct = s ? Math.max(0, Math.min(100, (1 - s.resetsInMin/300) * 100)) : 0;
-  const weekPct = Math.max(0, Math.min(100, (1 - w.resetsInMin/(7*24*60)) * 100));
-  const row = (name, sub, resets, inMin, tok, cost, pct, dimmed) => `
+  // Riba: R olemas → Anthropicu päris % limiidist (värv 70/90 juures).
+  // R puudub → kui suur osa AJAAKNAST on läbi — halb asendus, märgitud „aega".
+  const timePct = s ? Math.max(0, Math.min(100, (1 - s.resetsInMin/300) * 100)) : 0;
+  const weekTimePct = Math.max(0, Math.min(100, (1 - w.resetsInMin/(7*24*60)) * 100));
+  const bar = (pct, real) => {
+    if (pct == null) return '<span class="model">—</span>';
+    const cls = !real ? '' : pct >= 90 ? 'critical' : pct >= 70 ? 'warning' : '';
+    return `<div style="display:flex;align-items:center;gap:8px">
+      <div class="meter" style="flex:1;margin:0"><i class="${cls}" style="width:${Math.min(100, pct).toFixed(1)}%"></i></div>
+      <span class="model">${pct.toFixed(0)}%${real ? '' : ' aega'}</span></div>`;
+  };
+  const row = (name, sub, resets, inMin, tok, cost, pct, real, dimmed) => `
     <tr${dimmed ? ' style="opacity:.55"' : ''}>
       <td><span class="proj">${name}</span><div class="sid">${sub}</div></td>
-      <td>${resets}<div class="sid">${dur(inMin)} pärast</div></td>
-      <td class="num">${compact(tok)}</td>
-      <td class="num">${eur(cost)}</td>
-      <td class="barcell">
-        <div style="display:flex;align-items:center;gap:8px">
-          <div class="meter" style="flex:1;margin:0"><i style="width:${pct.toFixed(1)}%"></i></div>
-          <span class="model">${pct.toFixed(0)}%</span>
-        </div>
-      </td>
+      <td>${resets ? clock(resets) : '—'}<div class="sid">${inMin != null ? dur(inMin) + ' pärast' : ''}</div></td>
+      <td class="num">${tok == null ? '—' : compact(tok)}</td>
+      <td class="num">${cost == null ? '—' : eur(cost)}</td>
+      <td class="barcell">${bar(pct, real)}</td>
     </tr>`;
-  document.getElementById('limitBody').innerHTML =
-    (s ? row('Praegune sessioon', '5 h aken · ' + num(s.entries) + ' API-päringut',
-             clock(s.resetsAt), s.resetsInMin, s.tokens, s.cost, sessPct, false)
-       : `<tr><td><span class="proj">Praegune sessioon</span><div class="sid">5 h aken</div></td>
-            <td colspan="4" class="model">aktiivset akent ei ole</td></tr>`) +
-    row('Kõik mudelid', 'nädalaaken', clock(w.resetsAt), w.resetsInMin,
-        w.allTokens, w.allCost, weekPct, false) +
-    row('Fable', 'nädalaaken', clock(w.resetsAt), w.resetsInMin,
-        w.fableTokens, w.fableCost, weekPct, w.fableTokens === 0);
+  const rs = R && R.session, rw = R && R.weekAll;
+  const sessRow = (s || rs)
+    ? row('Praegune sessioon', '5 h aken' + (s ? ' · ' + num(s.entries) + ' API-päringut' : ''),
+          rs ? rs.resetsAt : s.resetsAt, rs ? rs.resetsInMin : s.resetsInMin,
+          s ? s.tokens : null, s ? s.cost : null, rs ? rs.pct : timePct, !!rs, false)
+    : `<tr><td><span class="proj">Praegune sessioon</span><div class="sid">5 h aken</div></td>
+         <td colspan="4" class="model">aktiivset akent ei ole</td></tr>`;
+  const models = R ? R.models : [];
+  const fable = models.find(m => /fable/i.test(m.name));
+  const others = models.filter(m => m !== fable);
+  document.getElementById('limitBody').innerHTML = sessRow +
+    row('Kõik mudelid', 'nädalaaken', rw ? rw.resetsAt : w.resetsAt, rw ? rw.resetsInMin : w.resetsInMin,
+        w.allTokens, w.allCost, rw ? rw.pct : weekTimePct, !!rw, false) +
+    row('Fable', 'nädalaaken', fable ? fable.resetsAt : w.resetsAt, fable ? fable.resetsInMin : w.resetsInMin,
+        w.fableTokens, w.fableCost, fable ? fable.pct : weekTimePct, !!fable, w.fableTokens === 0 && !fable) +
+    others.map(m => row(m.name, 'nädalaaken', m.resetsAt, m.resetsInMin, null, null, m.pct, true, false)).join('');
+  const note = document.getElementById('limitNote');
+  if (note) note.textContent = R ? `Anthropic ${R.fetchedLabel}.`
+    : `⚠︎ Anthropicu otspunkt ei vasta${L.real && L.real.error ? ': ' + L.real.error : ''}.`;
 }
 
 function renderWorking(d){
