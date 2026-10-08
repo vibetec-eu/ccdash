@@ -1,12 +1,17 @@
 {
   "_comment": "Kopeeri ~/.claude/ccdash.config.json ja täida projectRoots oma masina järgi. Kõik väljad on valikulised.",
-
   "_timezone": "Ajavöönd, milles päevad grupeeritakse. Puudumisel süsteemi oma (/etc/localtime).",
   "timezone": "Europe/Tallinn",
-
-  "_projectRoots": "Kaustad, mille ALL olevad alamkaustad on projektid. Sessiooni projekt loetakse transkripti cwd-väljast: esimene osa juure järel ongi projektinimi. Loetle KÕIK puud, kus projektid elavad (kohalik kaust, pilvemount, teine kasutajakonto) — tuletada neid ei saa. Tühi loend = jääb ainult Claude Code'i kaustanimi.",
+  "_projectRoots": "Kaustad, mille ALL olevad alamkaustad on projektid. Sessiooni projekt loetakse transkripti cwd-väljast: esimene osa juure järel ongi projektinimi. Loetle KÕIK puud, kus projektid elavad (kohalik kaust, pilvemount, teine kasutajakonto) — tuletada neid ei saa. Tühi loend = jääb ainult Claude Code'i kaustanimi. JÄRJEKORD LOEB: sessioonivalija viskab samanimelised kordused välja ja esimene juur võidab.",
   "projectRoots": [],
-
+  "_remoteHost": "Masinanimi, mille kaudu sa selle masinani jõuad (ssh <host>). Sessioonivalija pakub siis ka varianti `ssh -t <host> \"tmux attach …\"`. Puudumisel pakutakse ainult kohalikku `tmux attach`.",
+  "remoteHost": "",
+  "_tmuxHost": "Masin, kus tmux ja Claude päriselt jooksevad, kui see EI OLE dashboardi masin. Iga tmux-kutse läheb siis üle `ssh -o BatchMode=yes <host>` (paroolita ssh). Tavaliselt sama mis remoteHost. Tühi = tmux kohapeal.",
+  "tmuxHost": "",
+  "_terminalUri": "Valikuline. Link, mille dashboardi masin pärast klikki `open`-iga avab, et redaktori terminal ühenduks ise. {session} = tmux-sessiooni nimi. Ritemark: paigalda ritemark-ext/ ja kasuta ritemark://heikki.ccdash-terminal/attach?session={session}. Tühi = ainult kopeerimine.",
+  "terminalUri": "",
+  "_peers": "Teised masinad, kus Claude Code jookseb, ssh-aliastena. Nende ~/.claude/projects peegeldatakse kausta ~/.claude/peers/<host>/ ja loetakse kokku (ccusage dedupib). Vajab paroolita ssh + rsync. Tühi = ainult see masin.",
+  "peers": [],
   "_thresholds": "Hoiatusläved. monthEur kuvatakse dashboardil, dayUsd ja monthUsd käivitavad päevalogija macOS-teate.",
   "thresholds": {
     "monthEur": 300.0,

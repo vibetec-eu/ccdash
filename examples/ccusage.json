@@ -3,10 +3,24 @@
   "defaults": {
     "pricingOverrides": {
       "claude-opus-5": {
-        "inputCostPerToken": 0.000005,
-        "outputCostPerToken": 0.000025,
-        "cacheCreationInputTokenCost": 0.00000625,
-        "cacheReadInputTokenCost": 0.0000005,
+        "inputCostPerToken": 5e-06,
+        "outputCostPerToken": 2.5e-05,
+        "cacheCreationInputTokenCost": 6.25e-06,
+        "cacheReadInputTokenCost": 5e-07,
+        "maxInputTokens": 1000000
+      },
+      "claude-fable-5-1": {
+        "inputCostPerToken": 1e-05,
+        "outputCostPerToken": 5e-05,
+        "cacheCreationInputTokenCost": 1.25e-05,
+        "cacheReadInputTokenCost": 2.5e-07,
+        "maxInputTokens": 1000000
+      },
+      "claude-fable-5": {
+        "inputCostPerToken": 1e-05,
+        "outputCostPerToken": 5e-05,
+        "cacheCreationInputTokenCost": 1.25e-05,
+        "cacheReadInputTokenCost": 1e-06,
         "maxInputTokens": 1000000
       }
     }

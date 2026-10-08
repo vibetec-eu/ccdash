@@ -1,0 +1,24 @@
+{
+  "name": "ccdash-terminal",
+  "displayName": "ccdash terminal",
+  "description": "Opens a terminal attached to a remote tmux session when ccdash sends a URI.",
+  "version": "0.1.1",
+  "publisher": "heikki",
+  "license": "MIT",
+  "repository": {"type": "git", "url": "https://github.com/vibetec-eu/ccdash"},
+  "engines": {"vscode": "^1.100.0"},
+  "main": "./extension.js",
+  "activationEvents": ["onUri", "onStartupFinished"],
+  "contributes": {
+    "configuration": {
+      "title": "ccdash terminal",
+      "properties": {
+        "ccdashTerminal.host": {
+          "type": "string",
+          "default": "mini",
+          "description": "ssh host where the tmux sessions live (an entry in ~/.ssh/config)."
+        }
+      }
+    }
+  }
+}

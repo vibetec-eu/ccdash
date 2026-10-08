@@ -86,10 +86,36 @@ Removal: `./uninstall.sh` — your log and config are kept.
 
 | Field | Effect |
 |---|---|
-| `projectRoots` | Directories whose subdirectories are projects. **List every tree** where your projects live. |
+| `projectRoots` | Directories whose subdirectories are projects. **List every tree** where your projects live. **Order matters** — see below. |
+| `remoteHost` | Host name you reach this machine through (`ssh <host>`). Adds the `ssh -t <host> "tmux attach …"` variant to the session picker. Omit it and only the local command is offered. |
+| `tmuxHost` | Host where tmux and Claude actually run, when that is **not** the machine serving the dashboard (a laptop whose workstation is another Mac). Every tmux call then goes over `ssh -o BatchMode=yes <tmuxHost>`; needs passwordless ssh. Usually the same value as `remoteHost`. Omit it and tmux runs locally. |
+| `terminalUri` | Optional. A link the dashboard machine opens with `open` after a click, so an editor terminal attaches to the session by itself — no pasting. `{session}` is replaced with the tmux session name. For Ritemark/VS Code install the bundled extension (`ritemark-ext/`) and use `ritemark://heikki.ccdash-terminal/attach?session={session}`. Omit it and the click only copies the attach line. |
+| `peers` | Other machines that also run Claude Code, as ssh host aliases (`["mini"]`). Their `~/.claude/projects` is mirrored here and counted — see **Multiple machines** below. |
+| `externalSources` | Tools whose sessions ccusage discovers on its own but which never carry a cost (default `["openclaw"]`). Their tokens are shown, flagged as unpriced, and do not trip the pricing watchdog. A tag not on this list still counts as a lost price list. |
 | `timezone` | Day-boundary grouping. Defaults to the system zone. |
 | `thresholds.monthEur` | Monthly warning threshold shown on the dashboard (EUR). |
 | `thresholds.dayUsd` / `monthUsd` | Thresholds for the daily logger's macOS notification (USD). |
+
+**Order matters when a name appears in two roots.** The session picker lists the
+subdirectories of every root, and a project name can legitimately exist twice — say
+`~/dev/thing` (the repo) and `~/Projects/thing` (its notes). Two identical rows would be a
+riddle, and one of them would open a terminal in the wrong place, so **duplicates are
+dropped and the first root wins**. Put the tree you actually work in first. Cost
+attribution is unaffected: both paths report the same project name, which is correct —
+they are the same project.
+
+**Multiple machines (`peers`).** If Claude Code runs on more than one computer, each one
+writes its own `~/.claude/projects`, and ccusage only reads the local tree — so a dashboard
+on either machine shows a fraction of the truth (measured: two machines, almost exactly
+half each). With `peers` set, ccdash rsyncs every listed host's `~/.claude/projects` into
+`~/.claude/peers/<host>/projects/` every 5 minutes and hands ccusage both trees through a
+comma-separated `CLAUDE_CONFIG_DIR`. ccusage deduplicates sessions, so nothing is counted
+twice. Requirements: passwordless `ssh <host>` (the alias from your `~/.ssh/config`) and
+`rsync` on both ends. The copy is persistent: if the peer is unreachable, the last copy
+stays in use and the dashboard shows how old it is (yellow card after 30 minutes). Set
+`peers` on both machines pointing at each other and whichever dashboard you open shows the
+total. The daily logger refreshes the copy too, so the archive holds the combined figure.
+Nothing is deleted from the copy — a session removed on the peer stays here as archive.
 
 **Why `projectRoots` has to be listed by hand.** Claude Code stores transcripts in a
 directory named after a slug of the working path: `/Users/x/Projects/web` becomes
@@ -120,11 +146,68 @@ field and are free-form sentences about real work.
 `ccusage` loses old days and they cannot be reconstructed. Don't delete it, and don't try
 to "rebuild it from `ccusage`".
 
+### Sessions you cannot otherwise see
+
+Claude Code has two kinds of session that a terminal tab does not show you, and both cost
+money while you are not looking. ccdash surfaces them in the header.
+
+**Background jobs** (`claude --bg`) run in a daemon with no terminal at all. They appear in
+neither the editor's tab bar nor `/tasks`; the only places they exist are `claude agents`
+and `~/.claude/jobs/<id>/state.json`. Four of them once sat blocked for weeks.
+
+- A **waiting bar** appears at the top of the page — and *only* when something is actually
+  waiting. It shows the id, what the job is waiting for, how many days it has been stuck,
+  and a copyable `claude attach <id>`.
+- Existing session rows carry `bg`, `no tty`, `⏳ waiting` and `web ↗` badges.
+- The state is read from `state.json` on every refresh (~33 ms) but `claude agents --json`
+  is the **authority** on `state` and is consulted at most every 5 minutes — a job's
+  `state.json` can be stale (measured: "working" in the file, "blocked" per the CLI).
+- A job counts as waiting when `state == blocked` **or** `needs` is set. `needs` alone is
+  not enough: blocked jobs have been observed whose `needs` had gone empty.
+
+**The session picker** (`Sessions ▾`) lists the tmux sessions running on this machine —
+click one to copy its `tmux attach` line — then every project under `projectRoots`, then
+`+ new chat` for work that belongs to no project. Clicking a project **starts** the session
+here (`tmux new-session` in the project directory, running `claude` through a login shell)
+and hands you the attach command. An already-running session is never touched: no keys are
+sent into a live Claude prompt.
+
+Each row shows the project's state: a live dot (activity in the last 10 minutes), `bg` /
+`⏳` when a background job on that project is running or waiting, the last activity as a
+relative time, and the cost **as ccusage counts it** — every session still on disk, not this
+month. Recently active projects (7 days) are listed first, the rest alphabetically. A
+background job is matched to a project by the **first word of its prompt** (`HA/masterplan …`,
+`ccdash continue …`); a free-form prompt gets no project badge. Clicking a row turns it green
+with `✓ copied` right where you clicked, and the command stays in the sticky header.
+
+The toggle at the top of the menu decides whether the copied line is prefixed with
+`ssh -t <remoteHost>`. Turn it on when your terminal is already on this machine (an
+editor's remote-SSH terminal), off when it is somewhere else. The choice is remembered.
+
+With `tmuxHost` set, the picker lists and starts sessions **on that machine** — the menu
+heading says so (`Running · mini`). Each click makes a few ssh round-trips, so put
+`ControlMaster auto` / `ControlPersist 10m` for that host into `~/.ssh/config`; one
+handshake instead of four. Errors name the cause (`ssh mini timed out`, `no such directory
+on mini`) rather than a generic failure.
+
+> **This is the one endpoint that starts a process,** so it is worth knowing how it is
+> fenced. The browser never sends a path — it sends a project *name*, and the path is
+> looked up server-side from the configured roots. The session name is derived on the
+> server and must pass a strict allowlist. `POST` requires `Content-Type: application/json`
+> (which forces a CORS preflight that is never answered) plus `Origin` and `Host`
+> allowlists. Demo mode disables the picker entirely. **What none of this stops** is a
+> browser extension with broad permissions: extensions bypass CORS, and no localhost
+> server can prevent that.
+
 ### What it does not do
 
-- **No percentage of your limit.** Anthropic does not publish the limit anywhere
-  machine-readable (checked: transcripts, logs, caches, `~/.claude.json`). ccdash shows
-  actual volumes and reset times instead. For the percentage: claude.ai → Settings → Usage.
+- **Token and cost columns are local counts, not your limit.** They come from ccusage
+  reading this machine's (and peers') transcripts; claude.ai web chats and cloud sessions
+  are not in them. The *percentage of your limit* is a separate thing: ccdash reads it
+  from the same OAuth endpoint Claude Code's `/usage` uses (`api.anthropic.com/api/oauth/usage`,
+  token from the macOS Keychain entry `Claude Code-credentials`). If that call fails — most
+  often an expired token, fix with `claude` → `/login` — the last column falls back to
+  *elapsed time* of the window, marked „aega", and the reason is shown above the table.
 - **Not cross-platform.** launchd, `osascript` notifications and the Chrome app window are
   macOS-specific. The server itself (`python3 src/ccdash.py --port 8787`) runs anywhere.
 - **Sends nothing anywhere.** Everything stays on your machine; the network is touched only
@@ -204,10 +287,36 @@ Eemaldus: `./uninstall.sh` — logi ja seadistus jäävad alles.
 
 | Väli | Mida teeb |
 |---|---|
-| `projectRoots` | Kaustad, mille alamkaustad on projektid. **Loetle kõik puud**, kus projektid elavad. |
+| `projectRoots` | Kaustad, mille alamkaustad on projektid. **Loetle kõik puud**, kus projektid elavad. **Järjekord loeb** — vt allpool. |
+| `remoteHost` | Masinanimi, mille kaudu sa selle masinani jõuad (`ssh <host>`). Lisab sessioonivalijasse variandi `ssh -t <host> "tmux attach …"`. Puudumisel pakutakse ainult kohalikku käsku. |
+| `tmuxHost` | Masin, kus tmux ja Claude päriselt jooksevad, kui see **ei ole** dashboardi serveeriv masin (sülearvuti, mille tööjaam on teine Mac). Iga tmux-kutse läheb siis üle `ssh -o BatchMode=yes <tmuxHost>`; vajab paroolita ssh-d. Tavaliselt sama väärtus mis `remoteHost`. Puudumisel jookseb tmux kohapeal. |
+| `terminalUri` | Valikuline. Link, mille dashboardi masin pärast klikki `open`-iga avab, et redaktori terminal ühenduks sessiooniga ise — kleepimata. `{session}` asendub tmux-sessiooni nimega. Ritemarki/VS Code'i jaoks paigalda kaasasolev laiendus (`ritemark-ext/`) ja kasuta `ritemark://heikki.ccdash-terminal/attach?session={session}`. Puudumisel klikk ainult kopeerib käsurea. |
+| `peers` | Teised masinad, kus Claude Code samuti jookseb, ssh-aliastena (`["mini"]`). Nende `~/.claude/projects` peegeldatakse siia ja loetakse kokku — vt **Mitu masinat** allpool. |
+| `externalSources` | Tööriistad, mille sessioonid ccusage ise üles leiab, aga millel kulu kunagi ei ole (vaikimisi `["openclaw"]`). Nende tokenid näidatakse, märgitakse hinnata ja hinnavalvet need ei käivita. Silt, mida loendis ei ole, loeb endiselt hinnakirja kaoks. |
 | `timezone` | Päevade grupeerimine. Puudumisel süsteemi oma. |
 | `thresholds.monthEur` | Kuu hoiatuslävi dashboardil (EUR). |
 | `thresholds.dayUsd` / `monthUsd` | Päevalogija macOS-teate läved (USD). |
+
+**Järjekord loeb, kui sama nimi on kahes juures.** Sessioonivalija loetleb iga juure
+alamkaustad ja projektinimi võib ausalt esineda kaks korda — näiteks `~/dev/asi` (repo) ja
+`~/Projects/asi` (selle märkmed). Kaks ühesugust rida oleks kasutajale mõistatus ja üks
+neist avaks terminali vales kohas, seega **kordused visatakse välja ja esimene juur
+võidab**. Pane ettepoole see puu, kus sa päriselt töötad. Kulude omistamist projektidele
+see ei puuduta: mõlemad teed annavad sama projektinime, mis ongi õige — tegu on ühe
+projektiga.
+
+**Mitu masinat (`peers`).** Kui Claude Code jookseb rohkem kui ühes arvutis, kirjutab
+igaüks oma `~/.claude/projects` ja ccusage loeb ainult kohalikku puud — kummagi masina
+dashboard näitab siis osa tõest (mõõdetud: kaks masinat, peaaegu täpselt pool kumbki).
+`peers` seadistusega rsync'ib ccdash iga loetletud hosti `~/.claude/projects` kausta
+`~/.claude/peers/<host>/projects/` iga 5 minuti järel ja annab ccusage'ile mõlemad puud
+komaga eraldatud `CLAUDE_CONFIG_DIR`-is. ccusage dedupib sessioonid, midagi ei loeta
+topelt. Eeldused: paroolita `ssh <host>` (alias sinu `~/.ssh/config`-ist) ja `rsync`
+mõlemas otsas. Koopia on püsiv: kui teine masin ei vasta, jääb viimane koopia kasutusse ja
+dashboard näitab, kui vana see on (kollane kaart alates 30 minutist). Sea `peers` mõlemas
+masinas teineteise peale ja kumb dashboard sa ka avad, näitab see kogusummat. Ka
+päevalogija värskendab koopia, seega arhiivis on koondsumma. Koopiast ei kustutata
+midagi — teises masinas kustutatud sessioon jääb siia arhiivina alles.
 
 **Miks `projectRoots` tuleb käsitsi loetleda.** Claude Code hoiab transkripte kaustanime
 järgi, kus teest on tehtud slug: `/Users/x/Projects/veeb` → `-Users-x-Projects-veeb`.
@@ -237,11 +346,70 @@ jäävad päris. Mõeldud ekraanipildi või esitluse jaoks — sessioonipealkirj
 See on **ainus püsiv kasutusajalugu** — `ccusage` kaotab vanad päevad ja neid ei saa
 taastada. Ära kustuta seda faili ega "ehita uuesti üles".
 
+### Sessioonid, mida sa mujalt ei näe
+
+Claude Code'il on kaht sorti sessioone, mida terminali tabiriba ei näita, ja mõlemad
+maksavad raha ajal, mil sa neid ei vaata. ccdash toob nad päisesse.
+
+**Taustatööd** (`claude --bg`) jooksevad daemonis, ilma igasuguse terminalita. Neid ei ole
+ei redaktori tabiribal ega `/tasks` all; ainsad kohad, kus nad eksisteerivad, on
+`claude agents` ja `~/.claude/jobs/<id>/state.json`. Neli sellist seisis kord nädalaid
+blokeerituna.
+
+- Lehe tippu ilmub **ootajate riba** — ja ainult siis, kui keegi päriselt ootab. Seal on
+  id, mida töö ootab, mitu päeva ta on seisnud, ja kopeeritav `claude attach <id>`.
+- Olemasolevatel sessiooniridadel on märgid `bg`, `tabita`, `⏳ ootab` ja `veeb ↗`.
+- Seisu loetakse `state.json`-ist igal värskendusel (~33 ms), aga `state` välja
+  **autoriteet** on `claude agents --json`, mida küsitakse maksimaalselt iga 5 minuti
+  tagant — töö `state.json` võib olla aegunud (mõõdetud: failis „working", CLI järgi
+  „blocked").
+- Töö on ootaja, kui `state == blocked` **või** `needs` on täidetud. Ainult `needs`-ist ei
+  piisa: nähtud on blokeeritud töid, mille `needs` oli vahepeal tühjaks läinud.
+
+**Sessioonivalija** (`Sessioonid ▾`) loetleb selles masinas jooksvad tmux-sessioonid —
+klikk kopeerib nende `tmux attach` rea —, siis kõik projektid `projectRoots` alt, siis
+`+ uus chat` töö jaoks, mis ei kuulu ühessegi projekti. Klikk projektil **käivitab**
+sessiooni siin (`tmux new-session` projektikaustas, `claude` login-shelli kaudu) ja annab
+attach-käsu. Juba jooksvat sessiooni ei puututa kunagi: ühtegi klahvi ei saadeta elava
+Claude'i sisendisse.
+
+Iga rida näitab projekti seisu: live-täpp (tegevus viimase 10 minuti jooksul), `bg` / `⏳`,
+kui selle projekti taustatöö jookseb või ootab, viimane tegevus suhtelise ajana ja kulu
+**nii, nagu ccusage loeb** — kõik kettal olevad sessioonid, mitte jooksev kuu. Viimase 7 päeva
+jooksul liikunud projektid on ees, ülejäänud tähestikus. Taustatöö seotakse projektiga
+**prompti esimese sõna** järgi (`HA/masterplaan …`, `ccdash jätka …`); vabas vormis prompt
+märki ei saa. Klikk teeb rea roheliseks tekstiga `✓ kopeeritud` sealsamas, kus klikkisid, ja
+käsurida jääb kleepuvasse päisesse.
+
+Menüü ülaosa lüliti otsustab, kas kopeeritava rea ees on `ssh -t <remoteHost>`. Pane sisse,
+kui su terminal on juba selles masinas (redaktori remote-SSH terminal), välja siis, kui ta
+on mujal. Valik jääb meelde.
+
+Kui `tmuxHost` on seadistatud, näitab ja käivitab valija sessioone **selles masinas** —
+menüü pealkiri ütleb seda (`Jooksevad · mini`). Iga klikk teeb paar ssh-ringi, seega pane
+selle hosti jaoks `~/.ssh/config`-i `ControlMaster auto` / `ControlPersist 10m`: üks
+käepigistus nelja asemel. Veateated nimetavad põhjuse (`ssh mini aegus`, `kausta ei ole
+masinas mini`), mitte üldsõnalist tõrget.
+
+> **See on ainus endpoint, mis käivitab protsessi,** seega tasub teada, kuidas ta on
+> piiratud. Brauser ei saada kunagi teed — ta saadab projekti *nime* ja tee otsitakse
+> serveris seadistatud juurte hulgast. Sessiooninimi tuletatakse serveris ja peab läbima
+> range valge nimekirja. `POST` nõuab `Content-Type: application/json` (mis sunnib
+> CORS-preflighti, millele kunagi ei vastata) ning `Origin` ja `Host` valget nimekirja.
+> Demo-režiimis on valija täielikult väljas. **Mida see kõik EI peata:** laia õigusega
+> brauserilaiendus — laiendused lähevad CORS-ist mööda ja ükski localhost-server ei saa
+> seda takistada.
+
 ### Mida see EI tee
 
-- **Ei näita protsenti limiidist.** Anthropic ei avalda limiiti üheski masinloetavas kohas
-  (kontrollitud: transkriptid, logid, vahemälu, `~/.claude.json`). ccdash näitab tegelikke
-  mahtusid ja lähtestamisaegu. Protsent: claude.ai → Settings → Usage.
+- **Tokenite ja väärtuse veerud on kohalik loendus, mitte limiit.** Need tulevad
+  ccusage'ist selle masina (ja peer'ide) transkriptidest; claude.ai veebivestlusi ega
+  pilvesessioone seal ei ole. *Protsent limiidist* on eraldi asi: ccdash loeb selle
+  samast OAuth-otspunktist, mida Claude Code'i `/usage` kasutab
+  (`api.anthropic.com/api/oauth/usage`, token macOS-i Keychaini kirjest
+  `Claude Code-credentials`). Kui see päring ebaõnnestub — enamasti aegunud token,
+  ravi `claude` → `/login` — näitab viimane veerg akna *möödunud aega* märkega „aega"
+  ja põhjus on tabeli kohal kirjas.
 - **Ei ole mitmeplatvormiline.** launchd, `osascript`-teated ja Chrome'i äpiaken on macOS-i
   omad. Server ise (`python3 src/ccdash.py --port 8787`) töötab igal pool.
 - **Ei saada andmeid kuhugi.** Kõik jääb masinasse; võrku läheb ccdash ainult EKP kursi,

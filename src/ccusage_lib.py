@@ -44,7 +44,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-PROJECTS_DIR = Path.home() / ".claude" / "projects"
+# Kohalik transkriptipuu on `projects_dirs()[0]`; peer-koopiad tulevad sinna järele (vt „Mitu masinat").
 LOG_PATH = Path.home() / ".claude" / "logs" / "token-usage-daily.log"
 
 # --- Seadistus -------------------------------------------------------------
@@ -89,6 +89,152 @@ def threshold(name: str, default: float) -> float:
         return float((CONFIG.get("thresholds") or {}).get(name, default))
     except (TypeError, ValueError):
         return default
+
+
+# --- Mitu masinat (`peers`) -------------------------------------------------
+# Claude Code jookseb Heikkil kahel masinal (Air + Mini) ja kumbki kirjutab oma
+# `~/.claude/projects` alla. ccusage loeb ainult kohalikku puud, seega näitas dashboard
+# POOLT tegelikust (mõõdetud 08.09.2026: Air $317 + Mini $309 septembris).
+#
+# Lahendus on sümmeetriline: iga masin tõmbab rsync'iga teise masina `~/.claude/projects`
+# koopia kausta `~/.claude/peers/<host>/projects/` ja annab ccusage'ile MÕLEMAD puud
+# komaga eraldatud `CLAUDE_CONFIG_DIR`-is. ccusage dedupib sama sessiooni (kontrollitud:
+# sama kaust kaks korda = sama summa), seega topeltlugemist ei teki.
+#
+# Koopia on püsiv: kui teine masin ei vasta, jääb viimane koopia kasutusse ja
+# dashboard ütleb, kui vana see on. Sünk EI kasuta `--delete` — teises masinas
+# kustutatud sessioon jääb siia arhiivina alles ja ccusage loeb seda edasi.
+PEERS = tuple(h for h in (CONFIG.get("peers") or []) if isinstance(h, str) and h)
+PEERS_DIR = Path.home() / ".claude" / "peers"
+PEERS_STATE = Path.home() / ".claude" / "logs" / "peers.json"
+PEER_SYNC_TIMEOUT = 600      # esimene täiskoopia (~50 MB üle Tailscale'i) võib võtta minuteid
+PEER_STALE_MIN = 30          # vanem õnnestunud koopia = hoiatus dashboardil
+
+
+# --- Võõrad allikad ---------------------------------------------------------
+# ccusage avastab ISE ka OpenClaw'i sessioonid (`~/.openclaw/agents/*/sessions/*.jsonl`)
+# ja märgistab need mudelinimega `[openclaw] <mudel>`. OpenClaw kirjutab kulu nullina — ta
+# ei arvuta seda ja ccusage annab nulli muutmata edasi. Valve `_rows_look_priced` pidas
+# seda hinnakirja kaoks ja tappis kogu dashboardi (30.08–08.09.2026, 8,07 M tokenit).
+#
+# SULETUD loend meelega: tundmatu silt (nt `[bedrock] claude-opus-5`) tähendab endiselt
+# hinnakirja kadu ja viskab vea. Lahtine muster `^\[.*\] ` oleks andnud etteulatuvalt loa
+# kõigile tulevastele siltidele ja lammutanud lõks 1b kaitse (oponent 04.09.2026).
+# Ülekirjutatav: `ccdash.config.json` → `"externalSources": ["openclaw"]`.
+KNOWN_EXTERNAL_SOURCES = frozenset(
+    s for s in (CONFIG.get("externalSources") or ["openclaw"]) if isinstance(s, str) and s)
+_EXTERNAL_RE = re.compile(r"^\[([^\]]+)\]\s")
+
+
+def _external_source(model_name: str | None) -> str | None:
+    """'[openclaw] claude-opus-4-8' -> 'openclaw'; tundmatu silt või silt puudub -> None."""
+    m = _EXTERNAL_RE.match(model_name or "")
+    if m and m.group(1) in KNOWN_EXTERNAL_SOURCES:
+        return m.group(1)
+    return None
+
+
+def external_unpriced(rows: list[dict]) -> dict[str, int]:
+    """{allikas: tokenid}, mis on numbrites sees, aga hinnata (kulu 0).
+
+    Kutsu AINULT `daily` ridade peal — `session` kirjeldab sama kasutust ja summa
+    tuleks topelt (oponent 04.09).
+    """
+    out: dict[str, int] = {}
+    for r in rows:
+        for b in r.get("modelBreakdowns") or []:
+            src = _external_source(b.get("modelName"))
+            if src and _breakdown_tokens(b) > 0 and (b.get("cost") or 0) == 0:
+                out[src] = out.get(src, 0) + _breakdown_tokens(b)
+    return out
+
+
+def config_dirs() -> list[Path]:
+    """Kõik `.claude`-puud, mida ccusage peab lugema: kohalik + olemasolevad peer-koopiad.
+
+    Dünaamiline, mitte konstant: peer'i kaust tekib alles esimese õnnestunud sünkiga.
+    """
+    dirs = [Path.home() / ".claude"]
+    for host in PEERS:
+        d = PEERS_DIR / host
+        if (d / "projects").is_dir():
+            dirs.append(d)
+    return dirs
+
+
+def projects_dirs() -> list[Path]:
+    return [d / "projects" for d in config_dirs()]
+
+
+def sync_peers() -> dict[str, dict]:
+    """rsync iga peer'i `~/.claude/projects` → `PEERS_DIR/<host>/projects`.
+
+    Ei tõsta kunagi erindit: iga peer saab `{"ok", "at", "error"}` ja tulemus kirjutatakse
+    `PEERS_STATE`-i, et dashboard ja päevalogija näeksid sama seisu. Ebaõnnestunud sünk
+    jätab vana koopia puutumata (rsync kirjutab faili kaupa atomaarselt).
+    """
+    state = _read_peers_state()
+    for host in PEERS:
+        dest = PEERS_DIR / host / "projects"
+        entry = dict(state.get(host) or {})
+        try:
+            dest.mkdir(parents=True, exist_ok=True)
+            cmd = ["rsync", "-a", "--timeout=20",
+                   "-e", "ssh -o ConnectTimeout=5 -o BatchMode=yes",
+                   f"{host}:.claude/projects/", f"{dest}/"]
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=PEER_SYNC_TIMEOUT)
+            if p.returncode == 0:
+                entry = {"ok": True, "at": now().isoformat(), "error": None}
+            else:
+                tail = (p.stderr or "").strip().splitlines()[-1:] or ["rsync kukkus"]
+                entry.update({"ok": False, "error": f"rc={p.returncode}: {tail[0][:160]}"})
+        except subprocess.TimeoutExpired:
+            entry.update({"ok": False, "error": f"rsync aegus ({PEER_SYNC_TIMEOUT}s)"})
+        except OSError as e:
+            entry.update({"ok": False, "error": f"{type(e).__name__}: {e}"})
+        entry.setdefault("at", None)
+        state[host] = entry
+    try:
+        PEERS_STATE.parent.mkdir(parents=True, exist_ok=True)
+        PEERS_STATE.write_text(json.dumps(state), encoding="utf-8")
+    except OSError:
+        pass
+    return state
+
+
+def _read_peers_state() -> dict[str, dict]:
+    try:
+        st = json.loads(PEERS_STATE.read_text(encoding="utf-8"))
+        return st if isinstance(st, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def peers_status() -> list[dict]:
+    """Dashboardi payload: [{host, ok, at, ageMin, stale, error}] iga seadistatud peer'i kohta.
+
+    `at` on VIIMASE ÕNNESTUNUD koopia aeg — ebaõnnestunud katse seda ei nulli, sest just
+    see ütleb, kui vanad teise masina numbrid praegu on.
+    """
+    state = _read_peers_state()
+    out = []
+    for host in PEERS:
+        e = state.get(host) or {}
+        age = None
+        if e.get("at"):
+            try:
+                age = (now() - datetime.fromisoformat(e["at"])).total_seconds() / 60
+            except ValueError:
+                age = None
+        out.append({
+            "host": host,
+            "ok": bool(e.get("ok")),
+            "at": e.get("at"),
+            "ageMin": round(age) if age is not None else None,
+            "stale": age is None or age > PEER_STALE_MIN or not e.get("ok"),
+            "error": e.get("error"),
+        })
+    return out
 
 # --- Valuuta ---------------------------------------------------------------
 # ccusage arvutab kulu Anthropicu API listihinnast, mis on ALATI USD-s. Euroala
@@ -196,8 +342,13 @@ def _run(args: list[str], offline: bool) -> dict:
         cmd += ["--config", str(CCUSAGE_CONFIG)]
     if offline:
         cmd.append("--offline")
+    # Ilma `peers`-ita jääb keskkond puutumata — ccusage otsib siis ise oma vaikekaustad.
+    env = None
+    if PEERS:
+        env = {**os.environ, "CLAUDE_CONFIG_DIR": ",".join(str(d) for d in config_dirs())}
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=CCUSAGE_TIMEOUT)
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=CCUSAGE_TIMEOUT,
+                           env=env)
     except subprocess.TimeoutExpired as e:
         raise CcusageError(f"ccusage aegus ({CCUSAGE_TIMEOUT}s): {' '.join(args)}") from e
     if p.returncode != 0 or not p.stdout.strip():
@@ -232,6 +383,8 @@ def _rows_look_priced(rows: list[dict]) -> bool:
         breakdowns = r.get("modelBreakdowns") or []
         if breakdowns:
             for b in breakdowns:
+                if _external_source(b.get("modelName")):
+                    continue                          # võõras allikas — kulu EI SAAGI olla
                 if _breakdown_tokens(b) > 0 and (b.get("cost") or 0) == 0:
                     return False
         elif (r.get("totalCost") or 0) == 0:
@@ -253,6 +406,8 @@ def _unpriced(rows: list[dict], limit: int = 5) -> list[str]:
         if not breakdowns and (r.get("totalCost") or 0) == 0:
             out.append(f"{r.get('period')} (kogu rida)")
         for b in breakdowns:
+            if _external_source(b.get("modelName")):
+                continue
             if _breakdown_tokens(b) > 0 and (b.get("cost") or 0) == 0:
                 out.append(f"{r.get('period')} {b.get('modelName') or '?'}")
         if len(out) >= limit:
@@ -440,16 +595,43 @@ def _project_from_cwd(cwd: str) -> str | None:
     return None
 
 
+def _label_from_cwd(cwd: str | None) -> str | None:
+    """Loetav silt PÄRIS cwd-teest, kui ükski projektijuur ei sobinud.
+
+    Varem langeti siin tagasi Claude Code'i kaustanime (slug'i) peale, aga see
+    teisendus EI OLE pööratav — `.` ja `@` muutuvad samuti sidekriipsuks — ja
+    tulemuseks olid read nagu `Users/heikki//openclaw/w…`. Päris tee on
+    transkriptis olemas; sellest saab ausa nime ilma arvamiseta.
+    """
+    if not cwd or not cwd.startswith("/"):
+        return None
+    p = cwd.rstrip("/")
+    # macOS ajutised kaustad (`/var/folders` on symlink `/private/var/folders`-ile):
+    # nende viimane komponent on juhuslik räsi ja ei ütle mitte midagi.
+    if p.startswith("/private/var/folders/") or p.startswith("/var/folders/"):
+        return "(ajutine kaust)"
+    if p == str(Path.home()).rstrip("/"):
+        return GENERAL_LABEL
+    for root in _PROJECT_ROOTS:
+        if p == root.rstrip("/"):
+            return GENERAL_LABEL       # täpselt projektijuures = üldtöö
+    last = p.rsplit("/", 1)[-1]
+    return last or None
+
+
 def _scan_transcript(path: Path) -> dict:
-    """Leia failist domineeriv projekt ja viimane pealkiri."""
+    """Leia failist domineeriv projekt, domineeriv cwd ja viimane pealkiri."""
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return {"project": None, "title": None}
+        return {"project": None, "cwd": None, "title": None}
 
     counts: dict[str, int] = {}
+    cwds: dict[str, int] = {}
     for m in _CWD_RE.finditer(text):
-        proj = _project_from_cwd(m.group(1).replace("\\/", "/"))
+        raw = m.group(1).replace("\\/", "/")
+        cwds[raw] = cwds.get(raw, 0) + 1
+        proj = _project_from_cwd(raw)
         if proj:
             counts[proj] = counts.get(proj, 0) + 1
 
@@ -469,7 +651,8 @@ def _scan_transcript(path: Path) -> dict:
             break
 
     project = max(counts, key=counts.get) if counts else None
-    return {"project": project, "title": title, "ctx": ctx}
+    cwd = max(cwds, key=cwds.get) if cwds else None
+    return {"project": project, "cwd": cwd, "title": title, "ctx": ctx}
 
 
 def session_meta() -> dict[str, dict]:
@@ -485,12 +668,11 @@ def session_meta() -> dict[str, dict]:
     out: dict[str, dict] = {}
     dirty = False
 
-    if not PROJECTS_DIR.is_dir():
-        return out
-
-    for proj_dir in PROJECTS_DIR.iterdir():
-        if not proj_dir.is_dir():
-            continue
+    # Kohalik puu + peer-koopiad. Sama sessioon võib olla mõlemas (ccusage dedupib
+    # kulu); siin võidab esimene ehk kohalik, sest tema fail on värskem.
+    proj_dirs = [d for root in projects_dirs() if root.is_dir()
+                 for d in root.iterdir() if d.is_dir()]
+    for proj_dir in proj_dirs:
         fallback = _pretty_project(proj_dir.name)
         for entry in proj_dir.glob("*.jsonl"):
             sid = entry.stem
@@ -504,7 +686,7 @@ def session_meta() -> dict[str, dict]:
             # muutmise järel kehtima vana tulemus ja katkine loogika avastataks alles
             # nädalate pärast, kui failid ise muutuvad. Tõsta seda, kui _scan_transcript
             # või _project_from_cwd loogika muutub.
-            sig = f"v2:{int(st.st_mtime)}:{st.st_size}"
+            sig = f"v3:{int(st.st_mtime)}:{st.st_size}"
             hit = cache.get(sid)
             if hit and hit.get("sig") == sig:
                 info = hit
@@ -512,9 +694,16 @@ def session_meta() -> dict[str, dict]:
                 info = {**_scan_transcript(entry), "sig": sig}
                 cache[sid] = info
                 dirty = True
+            if sid in out:
+                continue                              # kohalik koopia võitis
             out[sid] = {
-                # cwd-põhine nimi on täpsem; kaustanimi jääb varuks
-                "project": info.get("project") or fallback,
+                # Kolm astet, täpsemast lõdvemani:
+                #   1. projektijuurele vastav nimi (`_project_from_cwd`)
+                #   2. loetav silt päris cwd-teest (`_label_from_cwd`)
+                #   3. kaustanimi ehk slug — ainult siis, kui cwd-d ei ole
+                "project": (info.get("project")
+                            or _label_from_cwd(info.get("cwd"))
+                            or fallback),
                 "title": info.get("title"),
                 "ctx": info.get("ctx") or 0,
             }
@@ -536,12 +725,9 @@ def session_project_map() -> dict[str, str]:
     korjamisest.
     """
     out: dict[str, str] = {}
-    if not PROJECTS_DIR.is_dir():
-        return out
     uuid_re = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
-    for proj in PROJECTS_DIR.iterdir():
-        if not proj.is_dir():
-            continue
+    for proj in (d for root in projects_dirs() if root.is_dir()
+                 for d in root.iterdir() if d.is_dir()):
         name = _pretty_project(proj.name)
         for entry in proj.iterdir():
             stem = entry.name[:-6] if entry.name.endswith(".jsonl") else entry.name
@@ -557,6 +743,10 @@ def enrich_sessions(sessions: list[dict]) -> list[dict]:
     for s in sessions:
         sid = s.get("period") or ""
         m = meta.get(sid, {})
+        # Võõra tööriista sessioon (`agent: "openclaw"`) ei ela ~/.claude/projects all,
+        # seega meta't ei ole — nimeta allika järgi, mitte „(tundmatu)" $0.00 reana.
+        agent = s.get("agent")
+        source = agent if agent in KNOWN_EXTERNAL_SOURCES else None
         last_raw = (s.get("metadata") or {}).get("lastActivity")
         last_dt = None
         if last_raw:
@@ -567,7 +757,8 @@ def enrich_sessions(sessions: list[dict]) -> list[dict]:
         out.append({
             "id": sid,
             "short": sid[:8],
-            "project": m.get("project") or "(tundmatu)",
+            "project": m.get("project") or source or "(tundmatu)",
+            "external": source,
             "title": m.get("title") or "",
             "ctx": m.get("ctx") or 0,
             # ok / warn / high — kas restart tasub end ära

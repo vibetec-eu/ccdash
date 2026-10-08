@@ -83,6 +83,16 @@ def append_or_replace(date: str, line: str) -> None:
                     encoding="utf-8")
 
 
+def external_flag(row: dict | None) -> str:
+    """'  [openclaw 0.25M tok hinnata]' — SELLE päeva võõra allika tokenid, mis on
+    tokeninumbris sees, aga dollarites mitte. Päeva kaupa, mitte kogusummana: päev ilma
+    nendeta ei saa märget (oponent 04.09). Sufiks ei riku LOG_LINE_RE sobitust."""
+    if not row:
+        return ""
+    ext = c.external_unpriced([row])
+    return "".join(f"  [{src} {tok / 1e6:.2f}M tok hinnata]" for src, tok in sorted(ext.items()))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--date", help="YYYY-MM-DD (vaikimisi eile, Eesti aeg)")
@@ -93,6 +103,10 @@ def main() -> int:
 
     today = c.today_str()
     target = args.date or (c.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    # Teiste masinate koopia värskeks ENNE lugemist — muidu sõltuks päevalogi sellest,
+    # kas ccdash-server juhtus öösel joosta. Ei tõsta erindit; vana koopia jääb.
+    c.sync_peers()
 
     try:
         daily, used_offline = c.fetch_daily()
@@ -120,7 +134,7 @@ def main() -> int:
             line_m = (f"{miss}  ${cost_m:.2f}  {int(row['totalTokens'])} tok"
                       f"  |  kuu kokku: "
                       f"${c.month_total_from_log(miss[:7], extra={miss: cost_m}, upto=miss):.2f}"
-                      f"  |  tagantjärele")
+                      f"  |  tagantjärele{external_flag(row)}")
             print(f"[täidan puuduva] {line_m}")
             if not args.dry_run:
                 append_or_replace(miss, line_m)
@@ -136,7 +150,7 @@ def main() -> int:
 
     flag = "  [offline-hinnakiri]" if used_offline else ""
     line = (f"{target}  ${cost:.2f}  {tokens} tok  |  kuu kokku: ${month_cost:.2f}"
-            f"  |  täna seni: ${today_cost:.2f}{flag}")
+            f"  |  täna seni: ${today_cost:.2f}{flag}{external_flag(day)}")
 
     print(line)
 
