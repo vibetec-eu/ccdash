@@ -239,6 +239,7 @@ def collect() -> dict:
             "projects": list_projects(),
             "remoteHost": c.CONFIG.get("remoteHost") or None,
             "tmuxHost": _host(),
+            "terminal": _terminal_uri() is not None,
             "error": None,
         }
     except Exception as e:  # noqa: BLE001 — dashboard ei tohi surra
@@ -323,6 +324,36 @@ def _explain(code: int) -> str:
         return (f"ssh või tmux puudub masinas {host}" if host
                 else "tmux puudub selles masinas — seadista `tmuxHost`")
     return f"tmux ei suutnud sessiooni luua (rc={code})"
+
+
+def _terminal_uri() -> str | None:
+    """Seadistus `terminalUri` — mall, mille `open` annab redaktorile (nt
+    Ritemarki laiendus `ritemark-ext/`), et see avaks tmux'iga ühendatud
+    terminali. Puudub = vana käitumine (ainult kopeerimine)."""
+    u = c.CONFIG.get("terminalUri")
+    return u if isinstance(u, str) and "{session}" in u else None
+
+
+def open_terminal(name: str) -> bool | None:
+    """Ava redaktoris terminal sessiooniga `name`. None = pole seadistatud.
+
+    Käivitab `open <uri>` SELLES masinas (kus ccdash jookseb ja ekraan on), mitte
+    tmuxHost'is. Brauser seda teha ei saa: pärast `await fetch` on kasutaja žest
+    kadunud ja Chrome lükkaks oma-skeemi lingi vaikselt tagasi.
+    True tähendab ainult, et `open` võttis lingi vastu — kas terminal ka tekkis,
+    seda siit näha ei ole (laiendus võib puududa).
+    """
+    tpl = _terminal_uri()
+    if tpl is None:
+        return None
+    if not _NAME_RE.match(name):
+        return False
+    uri = tpl.replace("{session}", name)   # nimi on valge nimekirja järgi URL-ohutu
+    try:
+        return subprocess.run(["open", uri], timeout=5,
+                              capture_output=True).returncode == 0
+    except Exception:  # noqa: BLE001 — vt mooduli päis
+        return False
 
 
 def attach_lines(name: str, remote_host: str | None) -> dict:

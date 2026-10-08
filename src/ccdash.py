@@ -1264,7 +1264,25 @@ function showSessMsg(html, isErr){
   sessMsg.hidden = false;
 }
 
-async function copyLine(name){
+// Server avab redaktoris terminali (seadistus terminalUri). Brauser ise ei saa:
+// pärast `await fetch` on kasutaja žest kadunud ja Chrome blokeeriks lingi.
+async function openTerminal(name){
+  try {
+    const r = await fetch('/api/tmux/open', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({session: name}), signal: AbortSignal.timeout(8000),
+    });
+    return (await r.json()).opened;
+  } catch(e){ return false; }
+}
+
+// Lõikelaud jääb ALATI varuks: `opened` tähendab ainult, et link läks teele —
+// kas terminal tekkis (laiendus olemas?), seda server ei näe.
+function openedNote(opened){
+  return opened ? '→ saadetud terminali. Kui aken ei avanenud, kleebi käsk ise. ' : '';
+}
+
+async function copyLine(name, opened){
   // Kaks varianti, sest terminal võib olla siinsamas masinas (VS Code
   // Remote-SSH) või mujal, kust tuleb esmalt ssh-da.
   const a = (tmuxData && tmuxData.remoteHost)
@@ -1276,16 +1294,18 @@ async function copyLine(name){
   try { await navigator.clipboard.writeText(cmd); ok = true; } catch(e){}
   // Käsk näidatakse ALATI, ka õnnestumisel: lõikelaud võib olla vahepeal üle
   // kirjutatud ja siis on tekst siin endiselt olemas.
-  showSessMsg((ok ? 'Kopeeritud ✓ — kleebi terminali.'
-                  : 'Lõikelaud ei olnud lubatud — vali ja kopeeri käsitsi:')
+  showSessMsg(openedNote(opened)
+              + (ok ? (opened ? 'Kopeeritud ✓' : 'Kopeeritud ✓ — kleebi terminali.')
+                    : 'Lõikelaud ei olnud lubatud — vali ja kopeeri käsitsi:')
               + `<code>${esc(cmd)}</code>`, false);
 }
 
 async function sessAction(el){
   const act = el.dataset.act;
   if (act === 'attach'){
-    await copyLine(el.dataset.name);
-    markRow(`[data-name="${CSS.escape(el.dataset.name)}"]`, '✓ kopeeritud', 'done');
+    const opened = (tmuxData && tmuxData.terminal) ? await openTerminal(el.dataset.name) : null;
+    await copyLine(el.dataset.name, opened);
+    markRow(`[data-name="${CSS.escape(el.dataset.name)}"]`, opened ? '✓ avatud' : '✓ kopeeritud', 'done');
     return;
   }
   showSessMsg('Käivitan…', false);
@@ -1305,9 +1325,10 @@ async function sessAction(el){
     const d = await r.json();
     if (!d.ok){ showSessMsg(esc(d.error || 'ei õnnestunud'), true); return; }
     await fetchTmux(); renderSessMenu();
-    await copyLine(d.session);
+    await copyLine(d.session, d.opened);
     // Uus rida leitakse SERVERI antud sessiooninime järgi (vt markRow).
-    markRow(`[data-name="${CSS.escape(d.session)}"]`, d.created ? '✓ käivitatud, kopeeritud' : '✓ kopeeritud', 'done');
+    markRow(`[data-name="${CSS.escape(d.session)}"]`,
+            (d.created ? '✓ käivitatud, ' : '✓ ') + (d.opened ? 'avatud' : 'kopeeritud'), 'done');
     if (!d.created)
       showSessMsg(sessMsg.innerHTML + '<br>Sessioon <strong>oli juba olemas</strong> — '
                   + 'midagi uut ei käivitatud.', false);
@@ -1370,7 +1391,7 @@ def _tmux_payload() -> dict:
 
 
 class Handler(BaseHTTPRequestHandler):
-    # ---- Ohutus: /api/tmux/new on ainus endpoint, mis käivitab protsessi ----
+    # ---- Ohutus: /api/tmux/new ja /api/tmux/open käivitavad protsessi ----
     #
     # Server kuulab 127.0.0.1-l, aga see EI kaitse brauseri eest: iga lahtine
     # veebileht võib teha päringu localhost'i. Seepärast kolm lukku.
@@ -1460,7 +1481,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, "text/plain; charset=utf-8", b"not found")
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path != "/api/tmux/new":
+        if self.path not in ("/api/tmux/new", "/api/tmux/open"):
             self._send(404, "text/plain; charset=utf-8", b"not found")
             return
         if DEMO:
@@ -1473,6 +1494,17 @@ class Handler(BaseHTTPRequestHandler):
         payload, code, msg = self._read_json_body()
         if payload is None:
             self._json(code, {"ok": False, "error": msg})
+            return
+
+        if self.path == "/api/tmux/open":
+            # Jooksva sessiooni klikk: midagi ei käivitata tmux'is, ainult
+            # terminal avatakse. Nimi läbib open_terminal()-is _NAME_RE.
+            name = payload.get("session")
+            if not isinstance(name, str):
+                self._json(400, {"ok": False, "error": "vigane session"})
+                return
+            self._json(200, {"ok": True, "session": name,
+                             "opened": tmux_lib.open_terminal(name)})
             return
 
         kind = payload.get("kind")
@@ -1498,6 +1530,8 @@ class Handler(BaseHTTPRequestHandler):
             "display": target["display"],
             "attach": tmux_lib.attach_lines(target["name"],
                                             c.CONFIG.get("remoteHost") or None),
+            # None = terminalUri seadistamata; True = `open` võttis lingi vastu.
+            "opened": tmux_lib.open_terminal(target["name"]),
         })
 
     def _json(self, code: int, obj: dict) -> None:
