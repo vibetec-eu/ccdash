@@ -8,7 +8,7 @@ ccdash's server opens `<scheme>://heikki.ccdash-terminal/attach?session=<name>`
 `ssh -t <host> "tmux attach -t <name>"`. The host is the setting
 `ccdashTerminal.host` (default `mini`), never taken from the link.
 
-Install: `npx @vscode/vsce package --allow-missing-repository` → `<editor>/bin/code --install-extension ccdash-terminal-0.1.0.vsix`.
+Install: `npx @vscode/vsce package --allow-missing-repository` → `<editor>/bin/code --install-extension ccdash-terminal-0.1.1.vsix`.
 
 ---
 

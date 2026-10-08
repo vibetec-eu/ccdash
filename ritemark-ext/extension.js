@@ -32,7 +32,8 @@ function attach(session) {
     name,
     shellPath: '/usr/bin/ssh',
     shellArgs: ['-t', host, `tmux attach -t ${session}`],
-    location: vscode.TerminalLocation.Editor,
+    // Paneelis, teiste terminalide kõrval (loend paremal), mitte redaktori tabina.
+    location: vscode.TerminalLocation.Panel,
   });
   term.show();
 }

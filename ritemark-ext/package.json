@@ -2,7 +2,7 @@
   "name": "ccdash-terminal",
   "displayName": "ccdash terminal",
   "description": "Opens a terminal attached to a remote tmux session when ccdash sends a URI.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "heikki",
   "license": "MIT",
   "repository": {"type": "git", "url": "https://github.com/vibetec-eu/ccdash"},
